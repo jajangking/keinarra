@@ -585,18 +585,21 @@ export default function VisionPage() {
           }
           setCustomMaskData(debugMask);
         }
-        const regions = findContours(mask, W, H, 100);
+        const totalPixels = W * H;
+        const maskPercent = matchCount / totalPixels;
+        const minArea = Math.max(100, Math.round(totalPixels * 0.001));
+        const maxArea = Math.round(totalPixels * (Math.min(maskPercent * 5, 0.5)));
+        const regions = findContours(mask, W, H, minArea);
         const debugRegions: any[] = [];
-        const minAreaRatio = 0.2;
-        const maxAreaRatio = 5.0;
+        const isLowSat = profile.avgS < 25;
+        const simThreshold = isLowSat ? 40 : 60;
+
         for (const r of regions) {
+          if (r.area > maxArea) continue;
+
           const regionAspect = r.w / r.h;
           const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
-          const areaRatio = r.area / profile.capturedArea;
-          const sizeMatch = areaRatio >= minAreaRatio && areaRatio <= maxAreaRatio;
-          const wRatio = r.w / profile.capturedW;
-          const hRatio = r.h / profile.capturedH;
-          const dimMatch = wRatio >= 0.3 && wRatio <= 3.0 && hRatio >= 0.3 && hRatio <= 3.0;
+          const framePercent = (r.area / totalPixels) * 100;
 
           let totalSim = 0;
           let sampleCount = 0;
@@ -611,18 +614,17 @@ export default function VisionPage() {
           }
           const avgSim = sampleCount > 0 ? totalSim / sampleCount : 0;
           const fillRatio = r.area / (r.w * r.h);
-          const passed = sizeMatch && dimMatch && avgSim >= 60 && fillRatio > 0.15;
+          const passed = aspectMatch && avgSim >= simThreshold && fillRatio > 0.1;
 
           const failReasons: string[] = [];
-          if (!sizeMatch) failReasons.push(`area ${r.area} vs expected ~${profile.capturedArea} (${(areaRatio * 100).toFixed(0)}%)`);
-          if (!dimMatch) failReasons.push(`dims ${r.w}x${r.h} vs ${profile.capturedW}x${profile.capturedH}`);
-          if (avgSim < 60) failReasons.push(`sim ${Math.round(avgSim)}% < 60%`);
-          if (fillRatio <= 0.15) failReasons.push(`fill ${(fillRatio * 100).toFixed(0)}% too sparse`);
+          if (!aspectMatch) failReasons.push(`AR ${regionAspect.toFixed(1)} vs ${profile.aspectRatio.toFixed(1)} +/-${profile.aspectTolerance.toFixed(1)}`);
+          if (avgSim < simThreshold) failReasons.push(`sim ${Math.round(avgSim)}% < ${simThreshold}%`);
+          if (fillRatio <= 0.1) failReasons.push(`fill ${(fillRatio * 100).toFixed(0)}% too sparse`);
 
           debugRegions.push({
             x: r.x, y: r.y, w: r.w, h: r.h, area: r.area,
             aspectRatio: regionAspect, aspectMatch, avgSim: Math.round(avgSim),
-            areaRatio: areaRatio.toFixed(2), fillRatio: (fillRatio * 100).toFixed(0) + "%",
+            framePercent: framePercent.toFixed(2) + "%", fillRatio: (fillRatio * 100).toFixed(0) + "%",
             passed,
             failReason: failReasons.length > 0 ? failReasons.join("; ") : null,
           });
@@ -645,7 +647,7 @@ export default function VisionPage() {
               aspectRatio: profile.aspectRatio.toFixed(2), aspectTolerance: profile.aspectTolerance.toFixed(2),
               samples: profile.samples.length,
             },
-            settings: { threshold: customThreshold, minArea: 100, minSim: 60 },
+            settings: { threshold: customThreshold, minArea, minSim: profile.avgS < 25 ? 40 : 60, isLowSat: profile.avgS < 25 },
             maskPixels: matchCount,
             totalRegions: regions.length,
             passedRegions: debugRegions.filter(r => r.passed).length,
@@ -901,7 +903,12 @@ export default function VisionPage() {
     const profile = extractProfileFromRegion(x, y, w, h);
     if (profile) {
       setCapturedData(profile);
-      setNewProfileName("");
+      if (activeProfileId) {
+        const existing = customProfiles.find(p => p.id === activeProfileId);
+        setNewProfileName(existing?.name || "");
+      } else {
+        setNewProfileName("");
+      }
       setShowProfileModal(true);
     }
     setSelection(prev => ({ ...prev, active: false }));
@@ -1464,6 +1471,11 @@ export default function VisionPage() {
               {activeProfileId && (
                 <p className="text-xs text-yellow-400">
                   Sample akan ditambahkan ke profil aktif. Disarankan 3-5 sample dari sudut/cahaya berbeda.
+                </p>
+              )}
+              {capturedData.avgS < 25 && (
+                <p className="text-xs text-red-400">
+                  Warning: Saturasi rendah ({Math.round(capturedData.avgS)}%). Deteksi warna tidak akurat untuk objek abu-abu/putih. Gunakan objek berwarna untuk hasil terbaik.
                 </p>
               )}
               <div>
