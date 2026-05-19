@@ -6,11 +6,13 @@ type DetectionMode = "color" | "motion" | "object" | "custom" | "all";
 type RobotMode = "follow" | "interact" | "play";
 
 interface DetectedObject {
+  id: string;
   x: number;
   y: number;
   w: number;
   h: number;
   label: string;
+  customName?: string;
   color?: string;
   similarity?: number;
 }
@@ -106,6 +108,13 @@ export default function VisionPage() {
   const [capturedData, setCapturedData] = useState<CustomProfile | null>(null);
   const [showDebugMask, setShowDebugMask] = useState(false);
   const [customMaskData, setCustomMaskData] = useState<Uint8Array | null>(null);
+  const [objectNames, setObjectNames] = useState<Map<string, string>>(new Map());
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  const [showRenameModal, setShowRenameModal] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const trackedObjectsRef = useRef<Map<string, { x: number; y: number; w: number; h: number; lastSeen: number }>>(new Map());
+  const frameCountRef = useRef(0);
+  const nextIdRef = useRef(1);
 
   const startCamera = useCallback(async () => {
     try {
@@ -180,15 +189,16 @@ export default function VisionPage() {
     const sDiff = Math.abs(s - profile.avgS);
     const vDiff = Math.abs(v - profile.avgV);
     return Math.sqrt(
-      Math.pow(hDiff / 180, 2) * 0.5 +
-      Math.pow(sDiff / 100, 2) * 0.3 +
-      Math.pow(vDiff / 100, 2) * 0.2
+      Math.pow(hDiff / 180, 2) * 0.6 +
+      Math.pow(sDiff / 100, 2) * 0.25 +
+      Math.pow(vDiff / 100, 2) * 0.15
     );
   };
 
   const isInCustomRange = (r: number, g: number, b: number, profile: CustomProfile): boolean => {
     const dist = pixelDistanceToProfile(r, g, b, profile);
-    return dist <= (customThreshold / 100);
+    const threshold = (100 - customThreshold) / 100;
+    return dist <= threshold;
   };
 
   const colorSimilarity = (r: number, g: number, b: number, profile: CustomProfile): number => {
@@ -445,7 +455,7 @@ export default function VisionPage() {
       }
       const regions = findContours(mask, W, H, colorThreshold);
       for (const r of regions) {
-        detected.push({ ...r, label: `Color: ${targetColor}`, color: targetColor });
+        detected.push({ id: "", ...r, label: `Color: ${targetColor}`, color: targetColor });
       }
     }
 
@@ -464,7 +474,7 @@ export default function VisionPage() {
         }
         const regions = findContours(mask, W, H, minMotionArea);
         for (const r of regions) {
-          detected.push({ ...r, label: "Motion" });
+          detected.push({ id: "", ...r, label: "Motion" });
         }
       }
       prevFrameRef.current = ctx.getImageData(0, 0, W, H);
@@ -487,7 +497,7 @@ export default function VisionPage() {
       }
       const regions = findContours(edgeMask, W, H, 1000);
       for (const r of regions) {
-        detected.push({ ...r, label: "Object" });
+        detected.push({ id: "", ...r, label: "Object" });
       }
     }
 
@@ -495,18 +505,24 @@ export default function VisionPage() {
       const profile = customProfiles.find(p => p.id === activeProfileId);
       if (profile) {
         const mask = new Uint8Array(W * H);
+        let matchCount = 0;
         for (let i = 0; i < frame.data.length; i += 4) {
           const r = frame.data[i];
           const g = frame.data[i + 1];
           const b = frame.data[i + 2];
           if (isInCustomRange(r, g, b, profile)) {
             mask[i / 4] = 255;
+            matchCount++;
           }
         }
         if (showDebugMask) {
-          setCustomMaskData(new Uint8Array(mask));
+          const debugMask = new Uint8Array(W * H);
+          for (let i = 0; i < mask.length; i++) {
+            debugMask[i] = mask[i];
+          }
+          setCustomMaskData(debugMask);
         }
-        const regions = findContours(mask, W, H, 50);
+        const regions = findContours(mask, W, H, 100);
         for (const r of regions) {
           const regionAspect = r.w / r.h;
           const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
@@ -524,10 +540,42 @@ export default function VisionPage() {
             }
           }
           const avgSim = sampleCount > 0 ? totalSim / sampleCount : 0;
-          if (avgSim >= 50) {
-            detected.push({ ...r, label: `${profile.name}`, color: "custom", similarity: avgSim });
+          if (avgSim >= 60) {
+            detected.push({ id: "", ...r, label: `${profile.name}`, color: "custom", similarity: avgSim });
           }
         }
+      }
+    }
+
+    frameCountRef.current++;
+    const tracked = trackedObjectsRef.current;
+    const maxDist = 50;
+
+    for (const obj of detected) {
+      let assignedId = "";
+      let bestDist = maxDist;
+
+      for (const [id, t] of tracked) {
+        const dx = (obj.x + obj.w / 2) - (t.x + t.w / 2);
+        const dy = (obj.y + obj.h / 2) - (t.y + t.h / 2);
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          assignedId = id;
+        }
+      }
+
+      if (!assignedId) {
+        assignedId = `obj-${nextIdRef.current++}`;
+      }
+
+      tracked.set(assignedId, { x: obj.x, y: obj.y, w: obj.w, h: obj.h, lastSeen: frameCountRef.current });
+      (obj as any).id = assignedId;
+    }
+
+    for (const [id, t] of tracked) {
+      if (frameCountRef.current - t.lastSeen > 30) {
+        tracked.delete(id);
       }
     }
 
@@ -541,6 +589,8 @@ export default function VisionPage() {
     };
 
     for (const obj of detected) {
+      const objId = (obj as any).id || "unknown";
+      const customName = objectNames.get(objId);
       const c = obj.color ? colorMap[obj.color] || "#00ff00" : "#00ff00";
       const ox = obj.x * scaleX;
       const oy = obj.y * scaleY;
@@ -552,7 +602,8 @@ export default function VisionPage() {
 
       octx.fillStyle = c;
       octx.font = "14px monospace";
-      octx.fillText(obj.label, ox, oy - 5);
+      const displayName = customName || obj.label;
+      octx.fillText(`${objId} ${displayName}`, ox, oy - 5);
       const extraText = obj.similarity !== undefined ? `${Math.round(obj.similarity)}%` : `${obj.w}x${obj.h}`;
       octx.fillText(extraText, ox, oy + oh + 14);
 
@@ -745,6 +796,27 @@ export default function VisionPage() {
       setShowProfileModal(true);
     }
     setSelection(prev => ({ ...prev, active: false }));
+  };
+
+  const openRenameModal = (objId: string) => {
+    setSelectedObjectId(objId);
+    setRenameValue(objectNames.get(objId) || "");
+    setShowRenameModal(true);
+  };
+
+  const saveRename = () => {
+    if (!selectedObjectId) return;
+    if (renameValue.trim()) {
+      setObjectNames(prev => new Map(prev).set(selectedObjectId, renameValue.trim()));
+    } else {
+      setObjectNames(prev => {
+        const next = new Map(prev);
+        next.delete(selectedObjectId);
+        return next;
+      });
+    }
+    setShowRenameModal(false);
+    setSelectedObjectId(null);
   };
 
   const saveProfile = () => {
@@ -1114,15 +1186,31 @@ export default function VisionPage() {
             <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
               <h2 className="text-lg font-semibold mb-3">Detected Objects</h2>
               <div className="space-y-2 max-h-48 overflow-y-auto font-mono text-sm">
-                {objects.map((obj, i) => (
-                  <div key={i} className="bg-zinc-800 rounded p-2">
-                    <span className="text-green-400">{obj.label}</span>
-                    <span className="text-zinc-500 ml-2">
-                      ({obj.x}, {obj.y}) {obj.w}x{obj.h}
-                      {obj.similarity !== undefined && ` (${Math.round(obj.similarity)}%)`}
-                    </span>
-                  </div>
-                ))}
+                {objects.map((obj, i) => {
+                  const objId = (obj as any).id || `obj-${i}`;
+                  const customName = objectNames.get(objId);
+                  return (
+                    <div key={i} className="bg-zinc-800 rounded p-2">
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <span className="text-cyan-400">{objId}</span>
+                          {customName && <span className="text-yellow-400 ml-1">"{customName}"</span>}
+                          <span className="text-green-400 ml-1">{obj.label}</span>
+                        </div>
+                        <button
+                          onClick={() => openRenameModal(objId)}
+                          className="text-xs text-blue-400 hover:text-blue-300 px-2"
+                        >
+                          Rename
+                        </button>
+                      </div>
+                      <span className="text-zinc-500 text-xs">
+                        ({obj.x}, {obj.y}) {obj.w}x{obj.h}
+                        {obj.similarity !== undefined && ` (${Math.round(obj.similarity)}%)`}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1171,6 +1259,43 @@ export default function VisionPage() {
                 </button>
                 <button
                   onClick={() => { setShowProfileModal(false); setCapturedData(null); }}
+                  className="flex-1 px-4 py-2 bg-zinc-700 rounded-md hover:bg-zinc-600"
+                >
+                  Batal
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRenameModal && selectedObjectId && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-zinc-900 rounded-lg p-6 max-w-sm w-full border border-zinc-700">
+            <h2 className="text-xl font-bold mb-4">Rename Object</h2>
+            <div className="space-y-4">
+              <p className="text-sm text-zinc-400">ID: <span className="text-cyan-400">{selectedObjectId}</span></p>
+              <div>
+                <label className="text-sm text-zinc-400 block mb-1">Custom Name</label>
+                <input
+                  type="text"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  placeholder="contoh: kunci merah, botol biru"
+                  className="w-full px-3 py-2 bg-zinc-800 rounded border border-zinc-600 text-white placeholder-zinc-500"
+                  onKeyDown={(e) => e.key === "Enter" && saveRename()}
+                  autoFocus
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={saveRename}
+                  className="flex-1 px-4 py-2 bg-green-600 rounded-md hover:bg-green-700"
+                >
+                  Simpan
+                </button>
+                <button
+                  onClick={() => { setShowRenameModal(false); setSelectedObjectId(null); }}
                   className="flex-1 px-4 py-2 bg-zinc-700 rounded-md hover:bg-zinc-600"
                 >
                   Batal
