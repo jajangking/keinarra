@@ -642,6 +642,14 @@ export default function VisionPage() {
     };
   }, [isRunning, processFrame]);
 
+  const getTouchPos = (e: React.TouchEvent<HTMLCanvasElement>, rect: DOMRect) => {
+    const touch = e.touches[0];
+    return {
+      x: ((touch.clientX - rect.left) / rect.width) * W,
+      y: ((touch.clientY - rect.top) / rect.height) * H,
+    };
+  };
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (mode !== "custom") return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -662,7 +670,34 @@ export default function VisionPage() {
   const handleMouseUp = () => {
     if (!isSelecting) return;
     setIsSelecting(false);
+    finalizeSelection();
+  };
 
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (mode !== "custom") return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pos = getTouchPos(e, rect);
+    setSelection({ startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y, active: true });
+    setIsSelecting(true);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (!isSelecting) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pos = getTouchPos(e, rect);
+    setSelection(prev => ({ ...prev, endX: pos.x, endY: pos.y }));
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    if (!isSelecting) return;
+    setIsSelecting(false);
+    finalizeSelection();
+  };
+
+  const finalizeSelection = () => {
     const x = Math.max(0, Math.round(Math.min(selection.startX, selection.endX)));
     const y = Math.max(0, Math.round(Math.min(selection.startY, selection.endY)));
     const w = Math.min(W - x, Math.abs(Math.round(selection.endX - selection.startX)));
@@ -745,10 +780,10 @@ export default function VisionPage() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
-      <h1 className="text-3xl font-bold mb-6">Robot Vision Simulator</h1>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-3 sm:p-6">
+      <h1 className="text-2xl sm:text-3xl font-bold mb-4 sm:mb-6">Robot Vision Simulator</h1>
 
-      <div className="flex flex-col lg:flex-row gap-6">
+      <div className="flex flex-col lg:flex-row gap-4 sm:gap-6">
         <div className="flex-1">
           <div className="relative bg-zinc-900 rounded-lg overflow-hidden border border-zinc-800">
             <video ref={videoRef} className="w-full max-w-[640px] h-auto block" playsInline />
@@ -760,11 +795,14 @@ export default function VisionPage() {
             {mode === "custom" && isRunning && (
               <canvas
                 ref={selectionCanvasRef}
-                className="absolute inset-0 w-full h-full cursor-crosshair"
+                className="absolute inset-0 w-full h-full touch-none"
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onMouseLeave={handleMouseUp}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
               />
             )}
             {!isRunning && (
@@ -803,7 +841,7 @@ export default function VisionPage() {
           </div>
         </div>
 
-        <div className="w-full lg:w-80 space-y-4">
+        <div className="w-full lg:w-80 space-y-3 sm:space-y-4">
           <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
             <h2 className="text-lg font-semibold mb-3">Stats</h2>
             <div className="space-y-1 text-sm font-mono">
