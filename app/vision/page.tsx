@@ -96,7 +96,7 @@ export default function VisionPage() {
 
   const [customProfiles, setCustomProfiles] = useState<CustomProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [customThreshold, setCustomThreshold] = useState(60);
+  const [customThreshold, setCustomThreshold] = useState(40);
   const [selection, setSelection] = useState<SelectionBox>({ startX: 0, startY: 0, endX: 0, endY: 0, active: false });
   const [isSelecting, setIsSelecting] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
@@ -169,28 +169,27 @@ export default function VisionPage() {
     return hInRange && s >= sMin && s <= sMax && v >= vMin && v <= vMax;
   };
 
-  const isInCustomRange = (r: number, g: number, b: number, profile: CustomProfile): boolean => {
-    const [h, s, v] = rgbToHsv(r, g, b);
-    const hDiff = Math.abs(h - profile.avgH);
-    const hCheck = hDiff <= profile.hRange || (360 - hDiff) <= profile.hRange;
-    const sCheck = Math.abs(s - profile.avgS) <= profile.sRange;
-    const vCheck = Math.abs(v - profile.avgV) <= profile.vRange;
-    return hCheck && sCheck && vCheck;
-  };
-
-  const colorSimilarity = (r: number, g: number, b: number, profile: CustomProfile): number => {
+  const pixelDistanceToProfile = (r: number, g: number, b: number, profile: CustomProfile): number => {
     const [h, s, v] = rgbToHsv(r, g, b);
     let hDiff = Math.abs(h - profile.avgH);
     if (hDiff > 180) hDiff = 360 - hDiff;
     const sDiff = Math.abs(s - profile.avgS);
     const vDiff = Math.abs(v - profile.avgV);
-    const maxH = profile.hRange * 2 || 1;
-    const maxS = profile.sRange * 2 || 1;
-    const maxV = profile.vRange * 2 || 1;
-    const hScore = Math.max(0, 1 - hDiff / maxH);
-    const sScore = Math.max(0, 1 - sDiff / maxS);
-    const vScore = Math.max(0, 1 - vDiff / maxV);
-    return (hScore * 0.5 + sScore * 0.3 + vScore * 0.2) * 100;
+    return Math.sqrt(
+      Math.pow(hDiff / 180, 2) * 0.5 +
+      Math.pow(sDiff / 100, 2) * 0.3 +
+      Math.pow(vDiff / 100, 2) * 0.2
+    );
+  };
+
+  const isInCustomRange = (r: number, g: number, b: number, profile: CustomProfile): boolean => {
+    const dist = pixelDistanceToProfile(r, g, b, profile);
+    return dist <= (customThreshold / 100);
+  };
+
+  const colorSimilarity = (r: number, g: number, b: number, profile: CustomProfile): number => {
+    const dist = pixelDistanceToProfile(r, g, b, profile);
+    return Math.max(0, Math.round((1 - dist) * 100));
   };
 
   const findContours = (mask: Uint8Array, w: number, h: number, minArea: number): { x: number; y: number; w: number; h: number; area: number; perimeter: number }[] => {
@@ -301,9 +300,9 @@ export default function VisionPage() {
       id: Date.now().toString(),
       name: "",
       avgH, avgS, avgV,
-      hRange: (maxH - minH) / 2 + 15,
-      sRange: (maxS - minS) / 2 + 15,
-      vRange: (maxV - minV) / 2 + 15,
+      hRange: (maxH - minH) / 2 + 30,
+      sRange: (maxS - minS) / 2 + 30,
+      vRange: (maxV - minV) / 2 + 30,
       aspectRatio,
       compactness,
       dominantColors,
@@ -500,14 +499,20 @@ export default function VisionPage() {
         }
         const regions = findContours(mask, W, H, 50);
         for (const r of regions) {
-          const sim = colorSimilarity(
-            frame.data[(r.y * W + r.x) * 4],
-            frame.data[(r.y * W + r.x) * 4 + 1],
-            frame.data[(r.y * W + r.x) * 4 + 2],
-            profile
-          );
-          if (sim >= (100 - customThreshold)) {
-            detected.push({ ...r, label: `${profile.name}`, color: "custom", similarity: sim });
+          let totalSim = 0;
+          let sampleCount = 0;
+          const stepX = Math.max(1, Math.floor(r.w / 10));
+          const stepY = Math.max(1, Math.floor(r.h / 10));
+          for (let sy = r.y; sy < r.y + r.h; sy += stepY) {
+            for (let sx = r.x; sx < r.x + r.w; sx += stepX) {
+              const idx = (sy * W + sx) * 4;
+              totalSim += colorSimilarity(frame.data[idx], frame.data[idx + 1], frame.data[idx + 2], profile);
+              sampleCount++;
+            }
+          }
+          const avgSim = sampleCount > 0 ? totalSim / sampleCount : 0;
+          if (avgSim >= 50) {
+            detected.push({ ...r, label: `${profile.name}`, color: "custom", similarity: avgSim });
           }
         }
       }
@@ -901,7 +906,7 @@ export default function VisionPage() {
                 </p>
                 <div>
                   <label className="text-sm text-zinc-400 block mb-1">
-                    Threshold: {customThreshold}%
+                    Sensitivity: {customThreshold}% (rendah = ketat, tinggi = longgar)
                   </label>
                   <input
                     type="range"
