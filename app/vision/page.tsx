@@ -52,6 +52,13 @@ interface CustomProfile {
   thumbnail: string;
   createdAt: number;
   samples: { avgH: number; avgS: number; avgV: number; aspectRatio: number }[];
+  capturedW: number;
+  capturedH: number;
+  capturedArea: number;
+  debugInfo?: {
+    regionX: number; regionY: number; regionW: number; regionH: number;
+    pixelCount: number; minH: number; maxH: number; minS: number; maxS: number; minV: number; maxV: number;
+  };
 }
 
 interface SelectionBox {
@@ -112,9 +119,58 @@ export default function VisionPage() {
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [showRenameModal, setShowRenameModal] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [debugLog, setDebugLog] = useState<any[]>([]);
+  const [showDebugLog, setShowDebugLog] = useState(false);
   const trackedObjectsRef = useRef<Map<string, { x: number; y: number; w: number; h: number; lastSeen: number }>>(new Map());
   const frameCountRef = useRef(0);
   const nextIdRef = useRef(1);
+  const debugFrameCounter = useRef(0);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [profilesData, namesData, thresholdData, activeIdData] = await Promise.all([
+          localStorage.getItem("vision_profiles"),
+          localStorage.getItem("vision_names"),
+          localStorage.getItem("vision_threshold"),
+          localStorage.getItem("vision_active_profile"),
+        ]);
+        if (profilesData) setCustomProfiles(JSON.parse(profilesData));
+        if (namesData) setObjectNames(new Map(JSON.parse(namesData)));
+        if (thresholdData) setCustomThreshold(Number(thresholdData));
+        if (activeIdData) setActiveProfileId(activeIdData);
+      } catch (e) {
+        console.error("Failed to load from storage:", e);
+      }
+      setIsLoaded(true);
+    };
+    load();
+  }, []);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem("vision_profiles", JSON.stringify(customProfiles));
+  }, [customProfiles, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem("vision_names", JSON.stringify(Array.from(objectNames.entries())));
+  }, [objectNames, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem("vision_threshold", String(customThreshold));
+  }, [customThreshold, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (activeProfileId) {
+      localStorage.setItem("vision_active_profile", activeProfileId);
+    } else {
+      localStorage.removeItem("vision_active_profile");
+    }
+  }, [activeProfileId, isLoaded]);
 
   const startCamera = useCallback(async () => {
     try {
@@ -324,6 +380,13 @@ export default function VisionPage() {
       thumbnail,
       createdAt: Date.now(),
       samples: [{ avgH, avgS, avgV, aspectRatio }],
+      capturedW: w,
+      capturedH: h,
+      capturedArea: pixelCount,
+      debugInfo: {
+        regionX: x, regionY: y, regionW: w, regionH: h,
+        pixelCount, minH, maxH, minS, maxS, minV, maxV,
+      },
     };
   }, []);
 
@@ -523,10 +586,17 @@ export default function VisionPage() {
           setCustomMaskData(debugMask);
         }
         const regions = findContours(mask, W, H, 100);
+        const debugRegions: any[] = [];
+        const minAreaRatio = 0.2;
+        const maxAreaRatio = 5.0;
         for (const r of regions) {
           const regionAspect = r.w / r.h;
           const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
-          if (!aspectMatch) continue;
+          const areaRatio = r.area / profile.capturedArea;
+          const sizeMatch = areaRatio >= minAreaRatio && areaRatio <= maxAreaRatio;
+          const wRatio = r.w / profile.capturedW;
+          const hRatio = r.h / profile.capturedH;
+          const dimMatch = wRatio >= 0.3 && wRatio <= 3.0 && hRatio >= 0.3 && hRatio <= 3.0;
 
           let totalSim = 0;
           let sampleCount = 0;
@@ -540,9 +610,48 @@ export default function VisionPage() {
             }
           }
           const avgSim = sampleCount > 0 ? totalSim / sampleCount : 0;
-          if (avgSim >= 60) {
+          const fillRatio = r.area / (r.w * r.h);
+          const passed = sizeMatch && dimMatch && avgSim >= 60 && fillRatio > 0.15;
+
+          const failReasons: string[] = [];
+          if (!sizeMatch) failReasons.push(`area ${r.area} vs expected ~${profile.capturedArea} (${(areaRatio * 100).toFixed(0)}%)`);
+          if (!dimMatch) failReasons.push(`dims ${r.w}x${r.h} vs ${profile.capturedW}x${profile.capturedH}`);
+          if (avgSim < 60) failReasons.push(`sim ${Math.round(avgSim)}% < 60%`);
+          if (fillRatio <= 0.15) failReasons.push(`fill ${(fillRatio * 100).toFixed(0)}% too sparse`);
+
+          debugRegions.push({
+            x: r.x, y: r.y, w: r.w, h: r.h, area: r.area,
+            aspectRatio: regionAspect, aspectMatch, avgSim: Math.round(avgSim),
+            areaRatio: areaRatio.toFixed(2), fillRatio: (fillRatio * 100).toFixed(0) + "%",
+            passed,
+            failReason: failReasons.length > 0 ? failReasons.join("; ") : null,
+          });
+
+          if (passed) {
             detected.push({ id: "", ...r, label: `${profile.name}`, color: "custom", similarity: avgSim });
           }
+        }
+
+        debugFrameCounter.current++;
+        if (debugFrameCounter.current % 30 === 0) {
+          setDebugLog(prev => [...prev.slice(-200), {
+            type: "detection",
+            frame: frameCountRef.current,
+            profile: {
+              id: profile.id,
+              name: profile.name,
+              avgH: Math.round(profile.avgH), avgS: Math.round(profile.avgS), avgV: Math.round(profile.avgV),
+              hRange: Math.round(profile.hRange), sRange: Math.round(profile.sRange), vRange: Math.round(profile.vRange),
+              aspectRatio: profile.aspectRatio.toFixed(2), aspectTolerance: profile.aspectTolerance.toFixed(2),
+              samples: profile.samples.length,
+            },
+            settings: { threshold: customThreshold, minArea: 100, minSim: 60 },
+            maskPixels: matchCount,
+            totalRegions: regions.length,
+            passedRegions: debugRegions.filter(r => r.passed).length,
+            regions: debugRegions,
+            timestamp: Date.now(),
+          }]);
         }
       }
     }
@@ -834,12 +943,39 @@ export default function VisionPage() {
         const sRange = Math.max(...newSamples.map(s => Math.abs(s.avgS - avgS))) + 20;
         const vRange = Math.max(...newSamples.map(s => Math.abs(s.avgV - avgV))) + 20;
         const aspectTolerance = Math.max(...newSamples.map(s => Math.abs(s.aspectRatio - aspectRatio))) + 0.3;
-        return { ...p, avgH, avgS, avgV, hRange, sRange, vRange, aspectRatio, aspectTolerance, samples: newSamples };
+        const avgCapturedW = (p.capturedW * p.samples.length + capturedData.debugInfo!.regionW) / newSamples.length;
+        const avgCapturedH = (p.capturedH * p.samples.length + capturedData.debugInfo!.regionH) / newSamples.length;
+        const avgCapturedArea = (p.capturedArea * p.samples.length + capturedData.debugInfo!.pixelCount) / newSamples.length;
+        const updated = { ...p, avgH, avgS, avgV, hRange, sRange, vRange, aspectRatio, aspectTolerance, samples: newSamples, capturedW: avgCapturedW, capturedH: avgCapturedH, capturedArea: avgCapturedArea };
+        setDebugLog(prev => [...prev.slice(-200), {
+          type: "profile_update",
+          profile: {
+            id: p.id, name: p.name,
+            avgH: Math.round(avgH), avgS: Math.round(avgS), avgV: Math.round(avgV),
+            hRange: Math.round(hRange), sRange: Math.round(sRange), vRange: Math.round(vRange),
+            aspectRatio: aspectRatio.toFixed(2), aspectTolerance: aspectTolerance.toFixed(2),
+            samples: newSamples.map(s => ({ avgH: Math.round(s.avgH), avgS: Math.round(s.avgS), avgV: Math.round(s.avgV), aspectRatio: s.aspectRatio })),
+          },
+          timestamp: Date.now(),
+        }]);
+        return updated;
       }));
     } else {
       const profile = { ...capturedData, name: newProfileName.trim() };
       setCustomProfiles(prev => [...prev, profile]);
       setActiveProfileId(profile.id);
+      setDebugLog(prev => [...prev.slice(-200), {
+        type: "profile_capture",
+        profile: {
+          id: profile.id, name: profile.name,
+          avgH: Math.round(profile.avgH), avgS: Math.round(profile.avgS), avgV: Math.round(profile.avgV),
+          hRange: Math.round(profile.hRange), sRange: Math.round(profile.sRange), vRange: Math.round(profile.vRange),
+          aspectRatio: profile.aspectRatio.toFixed(2), aspectTolerance: profile.aspectTolerance.toFixed(2),
+          samples: profile.samples.map(s => ({ avgH: Math.round(s.avgH), avgS: Math.round(s.avgS), avgV: Math.round(s.avgV), aspectRatio: s.aspectRatio })),
+          debugInfo: profile.debugInfo,
+        },
+        timestamp: Date.now(),
+      }]);
     }
     setShowProfileModal(false);
     setCapturedData(null);
@@ -889,6 +1025,49 @@ export default function VisionPage() {
     setScore(0);
     setInteractionLog([]);
     setPlayTargets([]);
+  };
+
+  const clearStorage = async () => {
+    localStorage.removeItem("vision_profiles");
+    localStorage.removeItem("vision_names");
+    localStorage.removeItem("vision_threshold");
+    localStorage.removeItem("vision_active_profile");
+    setCustomProfiles([]);
+    setObjectNames(new Map());
+    setCustomThreshold(40);
+    setActiveProfileId(null);
+    setDebugLog([]);
+  };
+
+  const exportDebugLog = async () => {
+    const logData = {
+      profiles: customProfiles.map(p => ({
+        id: p.id,
+        name: p.name,
+        avgH: Math.round(p.avgH), avgS: Math.round(p.avgS), avgV: Math.round(p.avgV),
+        hRange: Math.round(p.hRange), sRange: Math.round(p.sRange), vRange: Math.round(p.vRange),
+        aspectRatio: p.aspectRatio, aspectTolerance: p.aspectTolerance,
+        capturedW: Math.round(p.capturedW), capturedH: Math.round(p.capturedH), capturedArea: Math.round(p.capturedArea),
+        samples: p.samples.map(s => ({ avgH: Math.round(s.avgH), avgS: Math.round(s.avgS), avgV: Math.round(s.avgV), aspectRatio: s.aspectRatio })),
+        debugInfo: p.debugInfo,
+      })),
+      settings: { threshold: customThreshold, activeProfileId },
+      detectionLog: debugLog,
+      exportedAt: new Date().toISOString(),
+    };
+    const json = JSON.stringify(logData, null, 2);
+    try {
+      await navigator.clipboard.writeText(json);
+      setDebugLog(prev => [...prev, { type: "info", message: "Debug log copied to clipboard!" }]);
+    } catch {
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vision-debug-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
   };
 
   const stateLabels: Record<string, string> = {
@@ -1039,6 +1218,29 @@ export default function VisionPage() {
                     }`}
                   >
                     {showDebugMask ? "Debug: ON" : "Debug: OFF"}
+                  </button>
+                  <button
+                    onClick={clearStorage}
+                    className="flex-1 px-3 py-2 rounded-md text-sm bg-red-900/50 text-red-400 hover:bg-red-900"
+                  >
+                    Clear Data
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowDebugLog(!showDebugLog)}
+                    className={`flex-1 px-3 py-2 rounded-md text-sm ${
+                      showDebugLog ? "bg-yellow-600 text-white" : "bg-zinc-800 text-zinc-400"
+                    }`}
+                  >
+                    Debug Log ({debugLog.length})
+                  </button>
+                  <button
+                    onClick={exportDebugLog}
+                    disabled={debugLog.length === 0}
+                    className="flex-1 px-3 py-2 rounded-md text-sm bg-green-900/50 text-green-400 hover:bg-green-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Export Log
                   </button>
                 </div>
                 {customProfiles.length > 0 && (
@@ -1211,6 +1413,33 @@ export default function VisionPage() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {showDebugLog && (
+            <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
+              <h2 className="text-lg font-semibold mb-3">Debug Log</h2>
+              <div className="space-y-2 max-h-64 overflow-y-auto font-mono text-xs">
+                {debugLog.map((log, i) => (
+                  <div key={i} className="bg-zinc-800 rounded p-2">
+                    {log.type === "detection" ? (
+                      <>
+                        <p className="text-yellow-400">Frame {log.frame} | Profile: {log.profile.name}</p>
+                        <p className="text-zinc-400">HSV: ({log.profile.avgH}, {log.profile.avgS}, {log.profile.avgV}) +/- ({log.profile.hRange}, {log.profile.sRange}, {log.profile.vRange})</p>
+                        <p className="text-zinc-400">AR: {log.profile.aspectRatio} +/- {log.profile.aspectTolerance} | Size: {log.profile.capturedW}x{log.profile.capturedH} ({log.profile.capturedArea}px)</p>
+                        <p className="text-zinc-400">Mask pixels: {log.maskPixels} | Regions: {log.totalRegions} total, {log.passedRegions} passed</p>
+                        {log.regions.map((r: any, ri: number) => (
+                          <p key={ri} className={r.passed ? "text-green-400" : "text-red-400"}>
+                            #{ri + 1}: {r.w}x{r.h} AR:{r.aspectRatio.toFixed(1)} Sim:{r.avgSim}% {r.passed ? "PASS" : `FAIL (${r.failReason})`}
+                          </p>
+                        ))}
+                      </>
+                    ) : (
+                      <p className="text-green-400">{log.message}</p>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           )}
