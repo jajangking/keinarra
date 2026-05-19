@@ -44,10 +44,12 @@ interface CustomProfile {
   sRange: number;
   vRange: number;
   aspectRatio: number;
+  aspectTolerance: number;
   compactness: number;
   dominantColors: [number, number, number][];
   thumbnail: string;
   createdAt: number;
+  samples: { avgH: number; avgS: number; avgV: number; aspectRatio: number }[];
 }
 
 interface SelectionBox {
@@ -102,6 +104,8 @@ export default function VisionPage() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [newProfileName, setNewProfileName] = useState("");
   const [capturedData, setCapturedData] = useState<CustomProfile | null>(null);
+  const [showDebugMask, setShowDebugMask] = useState(false);
+  const [customMaskData, setCustomMaskData] = useState<Uint8Array | null>(null);
 
   const startCamera = useCallback(async () => {
     try {
@@ -300,14 +304,16 @@ export default function VisionPage() {
       id: Date.now().toString(),
       name: "",
       avgH, avgS, avgV,
-      hRange: (maxH - minH) / 2 + 30,
-      sRange: (maxS - minS) / 2 + 30,
-      vRange: (maxV - minV) / 2 + 30,
+      hRange: (maxH - minH) / 2 + 20,
+      sRange: (maxS - minS) / 2 + 20,
+      vRange: (maxV - minV) / 2 + 20,
       aspectRatio,
+      aspectTolerance: 0.5,
       compactness,
       dominantColors,
       thumbnail,
       createdAt: Date.now(),
+      samples: [{ avgH, avgS, avgV, aspectRatio }],
     };
   }, []);
 
@@ -497,8 +503,15 @@ export default function VisionPage() {
             mask[i / 4] = 255;
           }
         }
+        if (showDebugMask) {
+          setCustomMaskData(new Uint8Array(mask));
+        }
         const regions = findContours(mask, W, H, 50);
         for (const r of regions) {
+          const regionAspect = r.w / r.h;
+          const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
+          if (!aspectMatch) continue;
+
           let totalSim = 0;
           let sampleCount = 0;
           const stepX = Math.max(1, Math.floor(r.w / 10));
@@ -566,6 +579,18 @@ export default function VisionPage() {
       octx.fillStyle = "#ffff00cc";
       octx.font = "12px monospace";
       octx.fillText(`Seleksi: ${Math.round(sw)}x${Math.round(sh)}`, sx, sy - 8);
+    }
+
+    if (showDebugMask && customMaskData) {
+      const maskImg = octx.createImageData(W, H);
+      for (let i = 0; i < customMaskData.length; i++) {
+        const v = customMaskData[i];
+        maskImg.data[i * 4] = 255;
+        maskImg.data[i * 4 + 1] = 0;
+        maskImg.data[i * 4 + 2] = 255;
+        maskImg.data[i * 4 + 3] = v > 0 ? 120 : 0;
+      }
+      octx.putImageData(maskImg, 0, 0);
     }
 
     const updatedRobot = updateRobot(detected, robot);
@@ -724,9 +749,26 @@ export default function VisionPage() {
 
   const saveProfile = () => {
     if (!capturedData || !newProfileName.trim()) return;
-    const profile = { ...capturedData, name: newProfileName.trim() };
-    setCustomProfiles(prev => [...prev, profile]);
-    setActiveProfileId(profile.id);
+
+    if (activeProfileId) {
+      setCustomProfiles(prev => prev.map(p => {
+        if (p.id !== activeProfileId) return p;
+        const newSamples = [...p.samples, { avgH: capturedData.avgH, avgS: capturedData.avgS, avgV: capturedData.avgV, aspectRatio: capturedData.aspectRatio }];
+        const avgH = newSamples.reduce((sum, s) => sum + s.avgH, 0) / newSamples.length;
+        const avgS = newSamples.reduce((sum, s) => sum + s.avgS, 0) / newSamples.length;
+        const avgV = newSamples.reduce((sum, s) => sum + s.avgV, 0) / newSamples.length;
+        const aspectRatio = newSamples.reduce((sum, s) => sum + s.aspectRatio, 0) / newSamples.length;
+        const hRange = Math.max(...newSamples.map(s => Math.abs(s.avgH - avgH))) + 20;
+        const sRange = Math.max(...newSamples.map(s => Math.abs(s.avgS - avgS))) + 20;
+        const vRange = Math.max(...newSamples.map(s => Math.abs(s.avgV - avgV))) + 20;
+        const aspectTolerance = Math.max(...newSamples.map(s => Math.abs(s.aspectRatio - aspectRatio))) + 0.3;
+        return { ...p, avgH, avgS, avgV, hRange, sRange, vRange, aspectRatio, aspectTolerance, samples: newSamples };
+      }));
+    } else {
+      const profile = { ...capturedData, name: newProfileName.trim() };
+      setCustomProfiles(prev => [...prev, profile]);
+      setActiveProfileId(profile.id);
+    }
     setShowProfileModal(false);
     setCapturedData(null);
   };
@@ -902,7 +944,7 @@ export default function VisionPage() {
               <h2 className="text-lg font-semibold mb-3">Custom Detection</h2>
               <div className="space-y-3">
                 <p className="text-xs text-zinc-400">
-                  Drag pada video untuk menyeleksi objek. Data warna, shape, dan karakteristik akan diekstrak.
+                  Drag pada video untuk menyeleksi objek. Tambah 3-5 sample dari sudut/cahaya berbeda untuk akurasi maksimal.
                 </p>
                 <div>
                   <label className="text-sm text-zinc-400 block mb-1">
@@ -916,6 +958,16 @@ export default function VisionPage() {
                     onChange={(e) => setCustomThreshold(Number(e.target.value))}
                     className="w-full"
                   />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowDebugMask(!showDebugMask)}
+                    className={`flex-1 px-3 py-2 rounded-md text-sm ${
+                      showDebugMask ? "bg-purple-600 text-white" : "bg-zinc-800 text-zinc-400"
+                    }`}
+                  >
+                    {showDebugMask ? "Debug: ON" : "Debug: OFF"}
+                  </button>
                 </div>
                 {customProfiles.length > 0 && (
                   <div>
@@ -933,7 +985,7 @@ export default function VisionPage() {
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium truncate">{p.name}</p>
                             <p className="text-xs text-zinc-500">
-                              H:{Math.round(p.avgH)} S:{Math.round(p.avgS)} V:{Math.round(p.avgV)}
+                              {p.samples.length} sample(s) | AR:{p.aspectRatio.toFixed(1)}
                             </p>
                           </div>
                           <button
@@ -1080,20 +1132,23 @@ export default function VisionPage() {
       {showProfileModal && capturedData && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
           <div className="bg-zinc-900 rounded-lg p-6 max-w-md w-full border border-zinc-700">
-            <h2 className="text-xl font-bold mb-4">Simpan Profil Custom</h2>
+            <h2 className="text-xl font-bold mb-4">
+              {activeProfileId ? "Tambah Sample ke Profil" : "Simpan Profil Custom"}
+            </h2>
             <div className="space-y-4">
               <div className="flex gap-4">
                 <img src={capturedData.thumbnail} alt="Preview" className="w-24 h-16 rounded object-cover border border-zinc-600" />
                 <div className="text-xs font-mono text-zinc-400 space-y-1">
                   <p>Avg HSV: ({Math.round(capturedData.avgH)}, {Math.round(capturedData.avgS)}, {Math.round(capturedData.avgV)})</p>
-                  <p>H Range: +/-{Math.round(capturedData.hRange)}</p>
-                  <p>S Range: +/-{Math.round(capturedData.sRange)}</p>
-                  <p>V Range: +/-{Math.round(capturedData.vRange)}</p>
                   <p>Aspect Ratio: {capturedData.aspectRatio.toFixed(2)}</p>
-                  <p>Compactness: {capturedData.compactness.toFixed(3)}</p>
                   <p>Dominant Colors: {capturedData.dominantColors.length}</p>
                 </div>
               </div>
+              {activeProfileId && (
+                <p className="text-xs text-yellow-400">
+                  Sample akan ditambahkan ke profil aktif. Disarankan 3-5 sample dari sudut/cahaya berbeda.
+                </p>
+              )}
               <div>
                 <label className="text-sm text-zinc-400 block mb-1">Nama Profil</label>
                 <input
@@ -1104,15 +1159,15 @@ export default function VisionPage() {
                   className="w-full px-3 py-2 bg-zinc-800 rounded border border-zinc-600 text-white placeholder-zinc-500"
                   onKeyDown={(e) => e.key === "Enter" && saveProfile()}
                   autoFocus
+                  readOnly={!!activeProfileId}
                 />
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={saveProfile}
-                  disabled={!newProfileName.trim()}
-                  className="flex-1 px-4 py-2 bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex-1 px-4 py-2 bg-green-600 rounded-md hover:bg-green-700"
                 >
-                  Simpan
+                  {activeProfileId ? "Tambah Sample" : "Simpan"}
                 </button>
                 <button
                   onClick={() => { setShowProfileModal(false); setCapturedData(null); }}
