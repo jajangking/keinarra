@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
-type DetectionMode = "color" | "motion" | "object" | "all";
+type DetectionMode = "color" | "motion" | "object" | "custom" | "all";
 type RobotMode = "follow" | "interact" | "play";
 
 interface DetectedObject {
@@ -12,6 +12,7 @@ interface DetectedObject {
   h: number;
   label: string;
   color?: string;
+  similarity?: number;
 }
 
 interface RobotState {
@@ -33,10 +34,35 @@ interface PlayTarget {
   active: boolean;
 }
 
+interface CustomProfile {
+  id: string;
+  name: string;
+  avgH: number;
+  avgS: number;
+  avgV: number;
+  hRange: number;
+  sRange: number;
+  vRange: number;
+  aspectRatio: number;
+  compactness: number;
+  dominantColors: [number, number, number][];
+  thumbnail: string;
+  createdAt: number;
+}
+
+interface SelectionBox {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  active: boolean;
+}
+
 export default function VisionPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  const selectionCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevFrameRef = useRef<ImageData | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number>(0);
@@ -67,6 +93,15 @@ export default function VisionPage() {
   const [colorThreshold, setColorThreshold] = useState(100);
   const [motionThreshold, setMotionThreshold] = useState(30);
   const [minMotionArea, setMinMotionArea] = useState(500);
+
+  const [customProfiles, setCustomProfiles] = useState<CustomProfile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [customThreshold, setCustomThreshold] = useState(60);
+  const [selection, setSelection] = useState<SelectionBox>({ startX: 0, startY: 0, endX: 0, endY: 0, active: false });
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [newProfileName, setNewProfileName] = useState("");
+  const [capturedData, setCapturedData] = useState<CustomProfile | null>(null);
 
   const startCamera = useCallback(async () => {
     try {
@@ -134,9 +169,33 @@ export default function VisionPage() {
     return hInRange && s >= sMin && s <= sMax && v >= vMin && v <= vMax;
   };
 
-  const findContours = (mask: Uint8Array, w: number, h: number, minArea: number): { x: number; y: number; w: number; h: number }[] => {
+  const isInCustomRange = (r: number, g: number, b: number, profile: CustomProfile): boolean => {
+    const [h, s, v] = rgbToHsv(r, g, b);
+    const hDiff = Math.abs(h - profile.avgH);
+    const hCheck = hDiff <= profile.hRange || (360 - hDiff) <= profile.hRange;
+    const sCheck = Math.abs(s - profile.avgS) <= profile.sRange;
+    const vCheck = Math.abs(v - profile.avgV) <= profile.vRange;
+    return hCheck && sCheck && vCheck;
+  };
+
+  const colorSimilarity = (r: number, g: number, b: number, profile: CustomProfile): number => {
+    const [h, s, v] = rgbToHsv(r, g, b);
+    let hDiff = Math.abs(h - profile.avgH);
+    if (hDiff > 180) hDiff = 360 - hDiff;
+    const sDiff = Math.abs(s - profile.avgS);
+    const vDiff = Math.abs(v - profile.avgV);
+    const maxH = profile.hRange * 2 || 1;
+    const maxS = profile.sRange * 2 || 1;
+    const maxV = profile.vRange * 2 || 1;
+    const hScore = Math.max(0, 1 - hDiff / maxH);
+    const sScore = Math.max(0, 1 - sDiff / maxS);
+    const vScore = Math.max(0, 1 - vDiff / maxV);
+    return (hScore * 0.5 + sScore * 0.3 + vScore * 0.2) * 100;
+  };
+
+  const findContours = (mask: Uint8Array, w: number, h: number, minArea: number): { x: number; y: number; w: number; h: number; area: number; perimeter: number }[] => {
     const visited = new Uint8Array(w * h);
-    const regions: { x: number; y: number; w: number; h: number }[] = [];
+    const regions: { x: number; y: number; w: number; h: number; area: number; perimeter: number }[] = [];
 
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -145,6 +204,7 @@ export default function VisionPage() {
 
         let minX = x, minY = y, maxX = x, maxY = y;
         let area = 0;
+        let perimeter = 0;
         const stack = [idx];
         visited[idx] = 1;
 
@@ -165,21 +225,92 @@ export default function VisionPage() {
             cx < w - 1 ? cur + 1 : -1,
           ];
 
+          let edgeCount = 0;
           for (const n of neighbors) {
-            if (n >= 0 && mask[n] > 0 && !visited[n]) {
+            if (n < 0 || mask[n] === 0) {
+              edgeCount++;
+            } else if (!visited[n]) {
               visited[n] = 1;
               stack.push(n);
             }
           }
+          perimeter += edgeCount;
         }
 
         if (area >= minArea) {
-          regions.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY });
+          regions.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY, area, perimeter });
         }
       }
     }
     return regions;
   };
+
+  const extractProfileFromRegion = useCallback((x: number, y: number, w: number, h: number): CustomProfile | null => {
+    if (!canvasRef.current || !videoRef.current) return null;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+
+    ctx.drawImage(videoRef.current, 0, 0, W, H);
+    const frame = ctx.getImageData(x, y, w, h);
+    const data = frame.data;
+
+    let totalH = 0, totalS = 0, totalV = 0;
+    let minH = 360, maxH = 0, minS = 100, maxS = 0, minV = 100, maxV = 0;
+    const colorBins: Map<string, number> = new Map();
+    let pixelCount = 0;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const [h, s, v] = rgbToHsv(r, g, b);
+      if (s < 10 || v < 10) continue;
+
+      totalH += h; totalS += s; totalV += v;
+      if (h < minH) minH = h; if (h > maxH) maxH = h;
+      if (s < minS) minS = s; if (s > maxS) maxS = s;
+      if (v < minV) minV = v; if (v > maxV) maxV = v;
+
+      const binKey = `${Math.round(h / 10) * 10},${Math.round(s / 10) * 10},${Math.round(v / 10) * 10}`;
+      colorBins.set(binKey, (colorBins.get(binKey) || 0) + 1);
+      pixelCount++;
+    }
+
+    if (pixelCount < 10) return null;
+
+    const sortedBins = Array.from(colorBins.entries()).sort((a, b) => b[1] - a[1]);
+    const dominantColors = sortedBins.slice(0, 5).map(([key]) => {
+      const [h, s, v] = key.split(",").map(Number);
+      return [h, s, v] as [number, number, number];
+    });
+
+    const avgH = totalH / pixelCount;
+    const avgS = totalS / pixelCount;
+    const avgV = totalV / pixelCount;
+
+    const aspectRatio = w / h;
+    const compactness = (4 * Math.PI * pixelCount) / ((2 * (w + h)) ** 2);
+
+    const thumbCanvas = document.createElement("canvas");
+    thumbCanvas.width = 64;
+    thumbCanvas.height = 48;
+    const thumbCtx = thumbCanvas.getContext("2d")!;
+    thumbCtx.drawImage(canvas, x, y, w, h, 0, 0, 64, 48);
+    const thumbnail = thumbCanvas.toDataURL("image/jpeg", 0.5);
+
+    return {
+      id: Date.now().toString(),
+      name: "",
+      avgH, avgS, avgV,
+      hRange: (maxH - minH) / 2 + 15,
+      sRange: (maxS - minS) / 2 + 15,
+      vRange: (maxV - minV) / 2 + 15,
+      aspectRatio,
+      compactness,
+      dominantColors,
+      thumbnail,
+      createdAt: Date.now(),
+    };
+  }, []);
 
   const updateRobot = useCallback((detected: DetectedObject[], currentRobot: RobotState): RobotState => {
     let next = { ...currentRobot };
@@ -226,10 +357,8 @@ export default function VisionPage() {
           next.speed = 0;
           next.state = "interacting";
           const obj = detected[0];
-          if (obj.color) {
-            const msg = `Mendeteksi warna: ${obj.color} di (${Math.round(tx)}, ${Math.round(ty)})`;
-            setInteractionLog(prev => [msg, ...prev].slice(0, 10));
-          }
+          const msg = `Mendeteksi: ${obj.label}${obj.similarity !== undefined ? ` (${Math.round(obj.similarity)}%)` : ""} di (${Math.round(tx)}, ${Math.round(ty)})`;
+          setInteractionLog(prev => [msg, ...prev].slice(0, 10));
         } else {
           next.speed = 0;
           next.state = "interacting";
@@ -357,12 +486,40 @@ export default function VisionPage() {
       }
     }
 
+    if (mode === "custom" && activeProfileId) {
+      const profile = customProfiles.find(p => p.id === activeProfileId);
+      if (profile) {
+        const mask = new Uint8Array(W * H);
+        for (let i = 0; i < frame.data.length; i += 4) {
+          const r = frame.data[i];
+          const g = frame.data[i + 1];
+          const b = frame.data[i + 2];
+          if (isInCustomRange(r, g, b, profile)) {
+            mask[i / 4] = 255;
+          }
+        }
+        const regions = findContours(mask, W, H, 50);
+        for (const r of regions) {
+          const sim = colorSimilarity(
+            frame.data[(r.y * W + r.x) * 4],
+            frame.data[(r.y * W + r.x) * 4 + 1],
+            frame.data[(r.y * W + r.x) * 4 + 2],
+            profile
+          );
+          if (sim >= (100 - customThreshold)) {
+            detected.push({ ...r, label: `${profile.name}`, color: "custom", similarity: sim });
+          }
+        }
+      }
+    }
+
     const colorMap: Record<string, string> = {
       red: "#ff0000",
       green: "#00ff00",
       blue: "#0000ff",
       yellow: "#ffff00",
       orange: "#ff8800",
+      custom: "#ff00ff",
     };
 
     for (const obj of detected) {
@@ -378,7 +535,8 @@ export default function VisionPage() {
       octx.fillStyle = c;
       octx.font = "14px monospace";
       octx.fillText(obj.label, ox, oy - 5);
-      octx.fillText(`${obj.w}x${obj.h}`, ox, oy + oh + 14);
+      const extraText = obj.similarity !== undefined ? `${Math.round(obj.similarity)}%` : `${obj.w}x${obj.h}`;
+      octx.fillText(extraText, ox, oy + oh + 14);
 
       const cx = ox + ow / 2;
       const cy = oy + oh / 2;
@@ -386,6 +544,23 @@ export default function VisionPage() {
       octx.arc(cx, cy, 4, 0, Math.PI * 2);
       octx.fillStyle = c;
       octx.fill();
+    }
+
+    if (selection.active) {
+      const sx = Math.min(selection.startX, selection.endX) * scaleX;
+      const sy = Math.min(selection.startY, selection.endY) * scaleY;
+      const sw = Math.abs(selection.endX - selection.startX) * scaleX;
+      const sh = Math.abs(selection.endY - selection.startY) * scaleY;
+
+      octx.strokeStyle = "#ffff00";
+      octx.lineWidth = 2;
+      octx.setLineDash([6, 3]);
+      octx.strokeRect(sx, sy, sw, sh);
+      octx.setLineDash([]);
+
+      octx.fillStyle = "#ffff00cc";
+      octx.font = "12px monospace";
+      octx.fillText(`Seleksi: ${Math.round(sw)}x${Math.round(sh)}`, sx, sy - 8);
     }
 
     const updatedRobot = updateRobot(detected, robot);
@@ -456,7 +631,7 @@ export default function VisionPage() {
     setObjects(detected);
 
     animFrameRef.current = requestAnimationFrame(processFrame);
-  }, [mode, targetColor, colorThreshold, motionThreshold, minMotionArea, robotMode, playTargets, updateRobot, robot]);
+  }, [mode, targetColor, colorThreshold, motionThreshold, minMotionArea, robotMode, playTargets, updateRobot, robot, customProfiles, activeProfileId, customThreshold, selection]);
 
   useEffect(() => {
     if (isRunning) {
@@ -466,6 +641,60 @@ export default function VisionPage() {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
   }, [isRunning, processFrame]);
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (mode !== "custom") return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * W;
+    const y = ((e.clientY - rect.top) / rect.height) * H;
+    setSelection({ startX: x, startY: y, endX: x, endY: y, active: true });
+    setIsSelecting(true);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isSelecting) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * W;
+    const y = ((e.clientY - rect.top) / rect.height) * H;
+    setSelection(prev => ({ ...prev, endX: x, endY: y }));
+  };
+
+  const handleMouseUp = () => {
+    if (!isSelecting) return;
+    setIsSelecting(false);
+
+    const x = Math.max(0, Math.round(Math.min(selection.startX, selection.endX)));
+    const y = Math.max(0, Math.round(Math.min(selection.startY, selection.endY)));
+    const w = Math.min(W - x, Math.abs(Math.round(selection.endX - selection.startX)));
+    const h = Math.min(H - y, Math.abs(Math.round(selection.endY - selection.startY)));
+
+    if (w < 10 || h < 10) {
+      setSelection(prev => ({ ...prev, active: false }));
+      return;
+    }
+
+    const profile = extractProfileFromRegion(x, y, w, h);
+    if (profile) {
+      setCapturedData(profile);
+      setNewProfileName("");
+      setShowProfileModal(true);
+    }
+    setSelection(prev => ({ ...prev, active: false }));
+  };
+
+  const saveProfile = () => {
+    if (!capturedData || !newProfileName.trim()) return;
+    const profile = { ...capturedData, name: newProfileName.trim() };
+    setCustomProfiles(prev => [...prev, profile]);
+    setActiveProfileId(profile.id);
+    setShowProfileModal(false);
+    setCapturedData(null);
+  };
+
+  const deleteProfile = (id: string) => {
+    setCustomProfiles(prev => prev.filter(p => p.id !== id));
+    if (activeProfileId === id) setActiveProfileId(null);
+  };
 
   const handleStart = async () => {
     await startCamera();
@@ -524,10 +753,28 @@ export default function VisionPage() {
           <div className="relative bg-zinc-900 rounded-lg overflow-hidden border border-zinc-800">
             <video ref={videoRef} className="w-full max-w-[640px] h-auto block" playsInline />
             <canvas ref={canvasRef} className="hidden" />
-            <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+            <canvas
+              ref={overlayRef}
+              className="absolute inset-0 w-full h-full pointer-events-none"
+            />
+            {mode === "custom" && isRunning && (
+              <canvas
+                ref={selectionCanvasRef}
+                className="absolute inset-0 w-full h-full cursor-crosshair"
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={handleMouseUp}
+              />
+            )}
             {!isRunning && (
               <div className="absolute inset-0 flex items-center justify-center bg-zinc-900">
                 <p className="text-zinc-500">Klik Start untuk mengaktifkan kamera</p>
+              </div>
+            )}
+            {mode === "custom" && isRunning && (
+              <div className="absolute top-2 left-2 bg-black/70 px-3 py-1 rounded text-xs text-yellow-400">
+                Drag untuk seleksi objek
               </div>
             )}
           </div>
@@ -591,7 +838,7 @@ export default function VisionPage() {
           <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
             <h2 className="text-lg font-semibold mb-3">Detection Mode</h2>
             <div className="grid grid-cols-2 gap-2">
-              {(["all", "color", "motion", "object"] as DetectionMode[]).map((m) => (
+              {(["all", "color", "motion", "object", "custom"] as DetectionMode[]).map((m) => (
                 <button
                   key={m}
                   onClick={() => setMode(m)}
@@ -606,6 +853,60 @@ export default function VisionPage() {
               ))}
             </div>
           </div>
+
+          {mode === "custom" && (
+            <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
+              <h2 className="text-lg font-semibold mb-3">Custom Detection</h2>
+              <div className="space-y-3">
+                <p className="text-xs text-zinc-400">
+                  Drag pada video untuk menyeleksi objek. Data warna, shape, dan karakteristik akan diekstrak.
+                </p>
+                <div>
+                  <label className="text-sm text-zinc-400 block mb-1">
+                    Threshold: {customThreshold}%
+                  </label>
+                  <input
+                    type="range"
+                    min="10"
+                    max="95"
+                    value={customThreshold}
+                    onChange={(e) => setCustomThreshold(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+                {customProfiles.length > 0 && (
+                  <div>
+                    <label className="text-sm text-zinc-400 block mb-2">Active Profile</label>
+                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                      {customProfiles.map(p => (
+                        <div
+                          key={p.id}
+                          className={`flex items-center gap-2 p-2 rounded cursor-pointer ${
+                            activeProfileId === p.id ? "bg-blue-900/50 border border-blue-500" : "bg-zinc-800"
+                          }`}
+                          onClick={() => setActiveProfileId(p.id === activeProfileId ? null : p.id)}
+                        >
+                          <img src={p.thumbnail} alt={p.name} className="w-10 h-8 rounded object-cover" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{p.name}</p>
+                            <p className="text-xs text-zinc-500">
+                              H:{Math.round(p.avgH)} S:{Math.round(p.avgS)} V:{Math.round(p.avgV)}
+                            </p>
+                          </div>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deleteProfile(p.id); }}
+                            className="text-red-400 hover:text-red-300 text-xs px-2"
+                          >
+                            X
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {robotMode === "play" && (
             <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
@@ -723,6 +1024,7 @@ export default function VisionPage() {
                     <span className="text-green-400">{obj.label}</span>
                     <span className="text-zinc-500 ml-2">
                       ({obj.x}, {obj.y}) {obj.w}x{obj.h}
+                      {obj.similarity !== undefined && ` (${Math.round(obj.similarity)}%)`}
                     </span>
                   </div>
                 ))}
@@ -731,6 +1033,55 @@ export default function VisionPage() {
           )}
         </div>
       </div>
+
+      {showProfileModal && capturedData && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-zinc-900 rounded-lg p-6 max-w-md w-full border border-zinc-700">
+            <h2 className="text-xl font-bold mb-4">Simpan Profil Custom</h2>
+            <div className="space-y-4">
+              <div className="flex gap-4">
+                <img src={capturedData.thumbnail} alt="Preview" className="w-24 h-16 rounded object-cover border border-zinc-600" />
+                <div className="text-xs font-mono text-zinc-400 space-y-1">
+                  <p>Avg HSV: ({Math.round(capturedData.avgH)}, {Math.round(capturedData.avgS)}, {Math.round(capturedData.avgV)})</p>
+                  <p>H Range: +/-{Math.round(capturedData.hRange)}</p>
+                  <p>S Range: +/-{Math.round(capturedData.sRange)}</p>
+                  <p>V Range: +/-{Math.round(capturedData.vRange)}</p>
+                  <p>Aspect Ratio: {capturedData.aspectRatio.toFixed(2)}</p>
+                  <p>Compactness: {capturedData.compactness.toFixed(3)}</p>
+                  <p>Dominant Colors: {capturedData.dominantColors.length}</p>
+                </div>
+              </div>
+              <div>
+                <label className="text-sm text-zinc-400 block mb-1">Nama Profil</label>
+                <input
+                  type="text"
+                  value={newProfileName}
+                  onChange={(e) => setNewProfileName(e.target.value)}
+                  placeholder="contoh: kunci, botol, dll"
+                  className="w-full px-3 py-2 bg-zinc-800 rounded border border-zinc-600 text-white placeholder-zinc-500"
+                  onKeyDown={(e) => e.key === "Enter" && saveProfile()}
+                  autoFocus
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={saveProfile}
+                  disabled={!newProfileName.trim()}
+                  className="flex-1 px-4 py-2 bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Simpan
+                </button>
+                <button
+                  onClick={() => { setShowProfileModal(false); setCapturedData(null); }}
+                  className="flex-1 px-4 py-2 bg-zinc-700 rounded-md hover:bg-zinc-600"
+                >
+                  Batal
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
