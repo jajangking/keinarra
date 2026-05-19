@@ -55,6 +55,9 @@ interface CustomProfile {
   capturedW: number;
   capturedH: number;
   capturedArea: number;
+  template?: number[];
+  templateW: number;
+  templateH: number;
   debugInfo?: {
     regionX: number; regionY: number; regionW: number; regionH: number;
     pixelCount: number; minH: number; maxH: number; minS: number; maxS: number; minV: number; maxV: number;
@@ -122,6 +125,7 @@ export default function VisionPage() {
   const [isLoaded, setIsLoaded] = useState(false);
   const [debugLog, setDebugLog] = useState<any[]>([]);
   const [showDebugLog, setShowDebugLog] = useState(false);
+  const [matchMethod, setMatchMethod] = useState<"color" | "template">("template");
   const trackedObjectsRef = useRef<Map<string, { x: number; y: number; w: number; h: number; lastSeen: number }>>(new Map());
   const frameCountRef = useRef(0);
   const nextIdRef = useRef(1);
@@ -262,6 +266,109 @@ export default function VisionPage() {
     return Math.max(0, Math.round((1 - dist) * 100));
   };
 
+  const templateMatch = (frame: ImageData, profile: CustomProfile): { x: number; y: number; w: number; h: number; similarity: number }[] => {
+    if (!profile.template || profile.template.length === 0) return [];
+    const { template, templateW: tw, templateH: th } = profile;
+    const fw = W, fh = H;
+    const scale = 4;
+    const sw = Math.floor(fw / scale);
+    const sh = Math.floor(fh / scale);
+
+    const gray = new Float32Array(sw * sh);
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const sx = x * scale;
+        const sy = y * scale;
+        const idx = (sy * fw + sx) * 4;
+        gray[y * sw + x] = 0.299 * frame.data[idx] + 0.587 * frame.data[idx + 1] + 0.114 * frame.data[idx + 2];
+      }
+    }
+
+    const stw = Math.max(2, Math.floor(tw * 0.7));
+    const sth = Math.max(2, Math.floor(th * 0.7));
+    const tmpl: number[] = [];
+    for (let y = 0; y < th; y++) {
+      for (let x = 0; x < tw; x++) {
+        const sy = Math.min(Math.floor(y * sth / th), sth - 1);
+        const sx = Math.min(Math.floor(x * stw / tw), stw - 1);
+        tmpl.push(template[y * tw + x]);
+      }
+    }
+
+    let tmplMean = 0;
+    let tmplStd = 0;
+    for (let i = 0; i < tmpl.length; i++) tmplMean += tmpl[i];
+    tmplMean /= tmpl.length;
+    for (let i = 0; i < tmpl.length; i++) tmplStd += Math.pow(tmpl[i] - tmplMean, 2);
+    tmplStd = Math.sqrt(tmplStd / tmpl.length);
+    if (tmplStd < 1) return [];
+
+    const results: { x: number; y: number; w: number; h: number; similarity: number }[] = [];
+    const stepX = Math.max(1, Math.floor(stw / 4));
+    const stepY = Math.max(1, Math.floor(sth / 4));
+
+    for (let y = 0; y <= sh - sth; y += stepY) {
+      for (let x = 0; x <= sw - stw; x += stepX) {
+        let sum = 0, sumSq = 0;
+        let cross = 0;
+        for (let ty = 0; ty < sth; ty++) {
+          for (let tx = 0; tx < stw; tx++) {
+            const fi = (y + ty) * sw + (x + tx);
+            const ti = ty * stw + tx;
+            const fv = gray[fi];
+            const tv = tmpl[ti];
+            sum += fv;
+            sumSq += fv * fv;
+            cross += fv * tv;
+          }
+        }
+        const n = stw * sth;
+        const fMean = sum / n;
+        const fStd = Math.sqrt(sumSq / n - fMean * fMean);
+        if (fStd < 1) continue;
+
+        let ncc = 0;
+        for (let ty = 0; ty < sth; ty++) {
+          for (let tx = 0; tx < stw; tx++) {
+            const fi = (y + ty) * sw + (x + tx);
+            const ti = ty * stw + tx;
+            ncc += (gray[fi] - fMean) * (tmpl[ti] - tmplMean);
+          }
+        }
+        ncc /= (n * fStd * tmplStd);
+        const sim = Math.max(0, ncc);
+
+        if (sim > 0.6) {
+          results.push({
+            x: x * scale,
+            y: y * scale,
+            w: stw * scale,
+            h: sth * scale,
+            similarity: sim * 100,
+          });
+        }
+      }
+    }
+
+    const merged: typeof results = [];
+    for (const r of results) {
+      let best = -1;
+      for (let i = 0; i < merged.length; i++) {
+        const m = merged[i];
+        const overlap = !(r.x + r.w < m.x || m.x + m.w < r.x || r.y + r.h < m.y || m.y + m.h < r.y);
+        if (overlap) { best = i; break; }
+      }
+      if (best >= 0) {
+        if (r.similarity > merged[best].similarity) {
+          merged[best] = r;
+        }
+      } else {
+        merged.push(r);
+      }
+    }
+    return merged;
+  };
+
   const findContours = (mask: Uint8Array, w: number, h: number, minArea: number): { x: number; y: number; w: number; h: number; area: number; perimeter: number }[] => {
     const visited = new Uint8Array(w * h);
     const regions: { x: number; y: number; w: number; h: number; area: number; perimeter: number }[] = [];
@@ -366,6 +473,21 @@ export default function VisionPage() {
     thumbCtx.drawImage(canvas, x, y, w, h, 0, 0, 64, 48);
     const thumbnail = thumbCanvas.toDataURL("image/jpeg", 0.5);
 
+    const tmplMaxDim = 48;
+    const tmplScale = Math.min(tmplMaxDim / w, tmplMaxDim / h, 1);
+    const tmplW = Math.max(4, Math.round(w * tmplScale));
+    const tmplH = Math.max(4, Math.round(h * tmplScale));
+    const tmplCanvas = document.createElement("canvas");
+    tmplCanvas.width = tmplW;
+    tmplCanvas.height = tmplH;
+    const tmplCtx = tmplCanvas.getContext("2d")!;
+    tmplCtx.drawImage(canvas, x, y, w, h, 0, 0, tmplW, tmplH);
+    const tmplData = tmplCtx.getImageData(0, 0, tmplW, tmplH);
+    const template: number[] = [];
+    for (let i = 0; i < tmplData.data.length; i += 4) {
+      template.push(0.299 * tmplData.data[i] + 0.587 * tmplData.data[i + 1] + 0.114 * tmplData.data[i + 2]);
+    }
+
     return {
       id: Date.now().toString(),
       name: "",
@@ -383,6 +505,9 @@ export default function VisionPage() {
       capturedW: w,
       capturedH: h,
       capturedArea: pixelCount,
+      template,
+      templateW: tmplW,
+      templateH: tmplH,
       debugInfo: {
         regionX: x, regionY: y, regionW: w, regionH: h,
         pixelCount, minH, maxH, minS, maxS, minV, maxV,
@@ -567,70 +692,93 @@ export default function VisionPage() {
     if (mode === "custom" && activeProfileId) {
       const profile = customProfiles.find(p => p.id === activeProfileId);
       if (profile) {
-        const mask = new Uint8Array(W * H);
-        let matchCount = 0;
-        for (let i = 0; i < frame.data.length; i += 4) {
-          const r = frame.data[i];
-          const g = frame.data[i + 1];
-          const b = frame.data[i + 2];
-          if (isInCustomRange(r, g, b, profile)) {
-            mask[i / 4] = 255;
-            matchCount++;
-          }
-        }
-        if (showDebugMask) {
-          const debugMask = new Uint8Array(W * H);
-          for (let i = 0; i < mask.length; i++) {
-            debugMask[i] = mask[i];
-          }
-          setCustomMaskData(debugMask);
-        }
-        const totalPixels = W * H;
-        const maskPercent = matchCount / totalPixels;
-        const minArea = Math.max(100, Math.round(totalPixels * 0.001));
-        const maxArea = Math.round(totalPixels * (Math.min(maskPercent * 5, 0.5)));
-        const regions = findContours(mask, W, H, minArea);
         const debugRegions: any[] = [];
-        const isLowSat = profile.avgS < 25;
-        const simThreshold = isLowSat ? 40 : 60;
+        const totalPixels = W * H;
 
-        for (const r of regions) {
-          if (r.area > maxArea) continue;
+        if (matchMethod === "template" && profile.template) {
+          const matches = templateMatch(frame, profile);
+          for (const m of matches) {
+            const regionAspect = m.w / m.h;
+            const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
+            const passed = aspectMatch && m.similarity >= 50;
 
-          const regionAspect = r.w / r.h;
-          const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
-          const framePercent = (r.area / totalPixels) * 100;
+            debugRegions.push({
+              x: m.x, y: m.y, w: m.w, h: m.h, area: m.w * m.h,
+              aspectRatio: regionAspect, aspectMatch, avgSim: Math.round(m.similarity),
+              framePercent: ((m.w * m.h) / totalPixels * 100).toFixed(2) + "%",
+              fillRatio: "100%",
+              passed,
+              failReason: !passed ? (!aspectMatch ? `AR ${regionAspect.toFixed(1)} vs ${profile.aspectRatio.toFixed(1)}` : `sim ${Math.round(m.similarity)}% < 50%`) : null,
+            });
 
-          let totalSim = 0;
-          let sampleCount = 0;
-          const stepX = Math.max(1, Math.floor(r.w / 10));
-          const stepY = Math.max(1, Math.floor(r.h / 10));
-          for (let sy = r.y; sy < r.y + r.h; sy += stepY) {
-            for (let sx = r.x; sx < r.x + r.w; sx += stepX) {
-              const idx = (sy * W + sx) * 4;
-              totalSim += colorSimilarity(frame.data[idx], frame.data[idx + 1], frame.data[idx + 2], profile);
-              sampleCount++;
+            if (passed) {
+              detected.push({ id: "", x: m.x, y: m.y, w: m.w, h: m.h, label: `${profile.name}`, color: "custom", similarity: m.similarity });
             }
           }
-          const avgSim = sampleCount > 0 ? totalSim / sampleCount : 0;
-          const fillRatio = r.area / (r.w * r.h);
-          const passed = aspectMatch && avgSim >= simThreshold && fillRatio > 0.1;
+        } else {
+          const mask = new Uint8Array(W * H);
+          let matchCount = 0;
+          for (let i = 0; i < frame.data.length; i += 4) {
+            const r = frame.data[i];
+            const g = frame.data[i + 1];
+            const b = frame.data[i + 2];
+            if (isInCustomRange(r, g, b, profile)) {
+              mask[i / 4] = 255;
+              matchCount++;
+            }
+          }
+          if (showDebugMask) {
+            const debugMask = new Uint8Array(W * H);
+            for (let i = 0; i < mask.length; i++) {
+              debugMask[i] = mask[i];
+            }
+            setCustomMaskData(debugMask);
+          }
+          const maskPercent = matchCount / totalPixels;
+          const minArea = Math.max(100, Math.round(totalPixels * 0.001));
+          const maxArea = Math.round(totalPixels * (Math.min(maskPercent * 5, 0.5)));
+          const regions = findContours(mask, W, H, minArea);
+          const isLowSat = profile.avgS < 25;
+          const simThreshold = isLowSat ? 40 : 60;
 
-          const failReasons: string[] = [];
-          if (!aspectMatch) failReasons.push(`AR ${regionAspect.toFixed(1)} vs ${profile.aspectRatio.toFixed(1)} +/-${profile.aspectTolerance.toFixed(1)}`);
-          if (avgSim < simThreshold) failReasons.push(`sim ${Math.round(avgSim)}% < ${simThreshold}%`);
-          if (fillRatio <= 0.1) failReasons.push(`fill ${(fillRatio * 100).toFixed(0)}% too sparse`);
+          for (const r of regions) {
+            if (r.area > maxArea) continue;
 
-          debugRegions.push({
-            x: r.x, y: r.y, w: r.w, h: r.h, area: r.area,
-            aspectRatio: regionAspect, aspectMatch, avgSim: Math.round(avgSim),
-            framePercent: framePercent.toFixed(2) + "%", fillRatio: (fillRatio * 100).toFixed(0) + "%",
-            passed,
-            failReason: failReasons.length > 0 ? failReasons.join("; ") : null,
-          });
+            const regionAspect = r.w / r.h;
+            const aspectMatch = Math.abs(regionAspect - profile.aspectRatio) <= profile.aspectTolerance;
+            const framePercent = (r.area / totalPixels) * 100;
 
-          if (passed) {
-            detected.push({ id: "", ...r, label: `${profile.name}`, color: "custom", similarity: avgSim });
+            let totalSim = 0;
+            let sampleCount = 0;
+            const stepX = Math.max(1, Math.floor(r.w / 10));
+            const stepY = Math.max(1, Math.floor(r.h / 10));
+            for (let sy = r.y; sy < r.y + r.h; sy += stepY) {
+              for (let sx = r.x; sx < r.x + r.w; sx += stepX) {
+                const idx = (sy * W + sx) * 4;
+                totalSim += colorSimilarity(frame.data[idx], frame.data[idx + 1], frame.data[idx + 2], profile);
+                sampleCount++;
+              }
+            }
+            const avgSim = sampleCount > 0 ? totalSim / sampleCount : 0;
+            const fillRatio = r.area / (r.w * r.h);
+            const passed = aspectMatch && avgSim >= simThreshold && fillRatio > 0.1;
+
+            const failReasons: string[] = [];
+            if (!aspectMatch) failReasons.push(`AR ${regionAspect.toFixed(1)} vs ${profile.aspectRatio.toFixed(1)} +/-${profile.aspectTolerance.toFixed(1)}`);
+            if (avgSim < simThreshold) failReasons.push(`sim ${Math.round(avgSim)}% < ${simThreshold}%`);
+            if (fillRatio <= 0.1) failReasons.push(`fill ${(fillRatio * 100).toFixed(0)}% too sparse`);
+
+            debugRegions.push({
+              x: r.x, y: r.y, w: r.w, h: r.h, area: r.area,
+              aspectRatio: regionAspect, aspectMatch, avgSim: Math.round(avgSim),
+              framePercent: framePercent.toFixed(2) + "%", fillRatio: (fillRatio * 100).toFixed(0) + "%",
+              passed,
+              failReason: failReasons.length > 0 ? failReasons.join("; ") : null,
+            });
+
+            if (passed) {
+              detected.push({ id: "", ...r, label: `${profile.name}`, color: "custom", similarity: avgSim });
+            }
           }
         }
 
@@ -646,10 +794,10 @@ export default function VisionPage() {
               hRange: Math.round(profile.hRange), sRange: Math.round(profile.sRange), vRange: Math.round(profile.vRange),
               aspectRatio: profile.aspectRatio.toFixed(2), aspectTolerance: profile.aspectTolerance.toFixed(2),
               samples: profile.samples.length,
+              hasTemplate: !!profile.template,
             },
-            settings: { threshold: customThreshold, minArea, minSim: profile.avgS < 25 ? 40 : 60, isLowSat: profile.avgS < 25 },
-            maskPixels: matchCount,
-            totalRegions: regions.length,
+            settings: { method: matchMethod, threshold: customThreshold, minSim: matchMethod === "template" ? 50 : (profile.avgS < 25 ? 40 : 60) },
+            totalRegions: debugRegions.length,
             passedRegions: debugRegions.filter(r => r.passed).length,
             regions: debugRegions,
             timestamp: Date.now(),
@@ -1216,6 +1364,31 @@ export default function VisionPage() {
                     onChange={(e) => setCustomThreshold(Number(e.target.value))}
                     className="w-full"
                   />
+                </div>
+                <div>
+                  <label className="text-sm text-zinc-400 block mb-2">Match Method</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setMatchMethod("color")}
+                      className={`px-3 py-2 rounded-md text-sm ${
+                        matchMethod === "color"
+                          ? "bg-blue-600 text-white"
+                          : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                      }`}
+                    >
+                      Color (HSV)
+                    </button>
+                    <button
+                      onClick={() => setMatchMethod("template")}
+                      className={`px-3 py-2 rounded-md text-sm ${
+                        matchMethod === "template"
+                          ? "bg-purple-600 text-white"
+                          : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                      }`}
+                    >
+                      Template
+                    </button>
+                  </div>
                 </div>
                 <div className="flex gap-2">
                   <button
