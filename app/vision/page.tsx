@@ -27,18 +27,62 @@ import {
 const W = 640;
 const H = 480;
 
+const SETTINGS_KEY = "vision_settings";
+
+interface PersistedSettings {
+  mode: DetectionMode;
+  robotMode: RobotMode;
+  targetColor: string;
+  colorTolerance: number;
+  colorMinArea: number;
+  motionThreshold: number;
+  motionMinArea: number;
+  edgeThreshold: number;
+  objectMinArea: number;
+  yoloConfidence: number;
+}
+
+const DEFAULT_SETTINGS: PersistedSettings = {
+  mode: "all",
+  robotMode: "follow",
+  targetColor: "red",
+  colorTolerance: 50,
+  colorMinArea: 200,
+  motionThreshold: 30,
+  motionMinArea: 500,
+  edgeThreshold: 80,
+  objectMinArea: 1000,
+  yoloConfidence: 40,
+};
+
+async function loadSettings(): Promise<PersistedSettings> {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch {}
+  return DEFAULT_SETTINGS;
+}
+
+async function saveSettings(settings: Partial<PersistedSettings>): Promise<void> {
+  try {
+    const existing = localStorage.getItem(SETTINGS_KEY);
+    const current = existing ? JSON.parse(existing) : {};
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...current, ...settings }));
+  } catch {}
+}
+
 export default function VisionPage() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [mode, setMode] = useState<DetectionMode>("all");
-  const [robotMode, setRobotMode] = useState<RobotMode>("follow");
-  const [targetColor, setTargetColor] = useState("red");
+  const [mode, setMode] = useState<DetectionMode>(DEFAULT_SETTINGS.mode);
+  const [robotMode, setRobotMode] = useState<RobotMode>(DEFAULT_SETTINGS.robotMode);
+  const [targetColor, setTargetColor] = useState(DEFAULT_SETTINGS.targetColor);
 
-  const [colorTolerance, setColorTolerance] = useState(50);
-  const [colorMinArea, setColorMinArea] = useState(200);
-  const [motionThreshold, setMotionThreshold] = useState(30);
-  const [motionMinArea, setMotionMinArea] = useState(500);
-  const [edgeThreshold, setEdgeThreshold] = useState(80);
-  const [objectMinArea, setObjectMinArea] = useState(1000);
+  const [colorTolerance, setColorTolerance] = useState(DEFAULT_SETTINGS.colorTolerance);
+  const [colorMinArea, setColorMinArea] = useState(DEFAULT_SETTINGS.colorMinArea);
+  const [motionThreshold, setMotionThreshold] = useState(DEFAULT_SETTINGS.motionThreshold);
+  const [motionMinArea, setMotionMinArea] = useState(DEFAULT_SETTINGS.motionMinArea);
+  const [edgeThreshold, setEdgeThreshold] = useState(DEFAULT_SETTINGS.edgeThreshold);
+  const [objectMinArea, setObjectMinArea] = useState(DEFAULT_SETTINGS.objectMinArea);
 
   const [debugLog, setDebugLog] = useState<DebugLogEntry[]>([]);
   const [playTargets, setPlayTargets] = useState<PlayTarget[]>([]);
@@ -56,6 +100,7 @@ export default function VisionPage() {
   const [selectedForLock, setSelectedForLock] = useState<string | null>(null);
   const [savedObjects, setSavedObjects] = useState<SavedObject[]>([]);
   const [lockedObjectId, setLockedObjectId] = useState<string | null>(null);
+  const [yoloConfidence, setYoloConfidence] = useState(DEFAULT_SETTINGS.yoloConfidence);
 
   const nextScanIdRef = useRef(1);
   const lastFrameRef = useRef<ImageData | null>(null);
@@ -79,6 +124,18 @@ export default function VisionPage() {
   });
 
   useEffect(() => {
+    loadSettings().then(s => {
+      setMode(s.mode);
+      setRobotMode(s.robotMode);
+      setTargetColor(s.targetColor);
+      setColorTolerance(s.colorTolerance);
+      setColorMinArea(s.colorMinArea);
+      setMotionThreshold(s.motionThreshold);
+      setMotionMinArea(s.motionMinArea);
+      setEdgeThreshold(s.edgeThreshold);
+      setObjectMinArea(s.objectMinArea);
+      setYoloConfidence(s.yoloConfidence);
+    });
     loadSavedColors().then(setSavedColors);
     loadSavedObjects().then(setSavedObjects);
   }, []);
@@ -190,8 +247,10 @@ export default function VisionPage() {
     getColor: yoloGetColor,
   } = useObjectDetector({
     enabled: useYolo && isRunning,
-    confidenceThreshold: 0.4,
+    confidenceThreshold: yoloConfidence / 100,
     classes: null,
+    targetWidth: W,
+    targetHeight: H,
   });
 
   const yoloStartRef = useRef(yoloStart);
@@ -242,10 +301,11 @@ export default function VisionPage() {
     model: groqModel,
     visionContext,
     tools: {
-      onSetRobotMode: (m) => setRobotMode(m as RobotMode),
-      onSetDetectionMode: (m) => setMode(m as DetectionMode),
+      onSetRobotMode: (m) => { setRobotMode(m as RobotMode); saveSettings({ robotMode: m as RobotMode }); },
+      onSetDetectionMode: (m) => { setMode(m as DetectionMode); saveSettings({ mode: m as DetectionMode }); },
       onSetTargetColor: (c, rgb) => {
         setTargetColor(c);
+        saveSettings({ targetColor: c });
         if (rgb) {
           const [h, s, v] = rgbToHsv(rgb.r, rgb.g, rgb.b);
           customRangeRef.current = {
@@ -257,12 +317,12 @@ export default function VisionPage() {
           setColorLabel(c);
         }
       },
-      onSetColorTolerance: (v) => setColorTolerance(v),
-      onSetColorMinArea: (v) => setColorMinArea(v),
-      onSetMotionThreshold: (v) => setMotionThreshold(v),
-      onSetMotionMinArea: (v) => setMotionMinArea(v),
-      onSetEdgeThreshold: (v) => setEdgeThreshold(v),
-      onSetObjectMinArea: (v) => setObjectMinArea(v),
+      onSetColorTolerance: (v) => { setColorTolerance(v); saveSettings({ colorTolerance: v }); },
+      onSetColorMinArea: (v) => { setColorMinArea(v); saveSettings({ colorMinArea: v }); },
+      onSetMotionThreshold: (v) => { setMotionThreshold(v); saveSettings({ motionThreshold: v }); },
+      onSetMotionMinArea: (v) => { setMotionMinArea(v); saveSettings({ motionMinArea: v }); },
+      onSetEdgeThreshold: (v) => { setEdgeThreshold(v); saveSettings({ edgeThreshold: v }); },
+      onSetObjectMinArea: (v) => { setObjectMinArea(v); saveSettings({ objectMinArea: v }); },
       onSpeak: (text) => {
         setInteractionLog(prev => [`AI: ${text}`, ...prev].slice(0, 10));
       },
@@ -271,6 +331,7 @@ export default function VisionPage() {
         setScannedObjects([]);
         setSelectedForLock(null);
         setMode("scan");
+        saveSettings({ mode: "scan" });
         nextScanIdRef.current = 1;
       },
       onStopScan: () => {
@@ -319,6 +380,7 @@ export default function VisionPage() {
       setColorLabel(null);
       const name = closestNamedColor(previewRgb.r, previewRgb.g, previewRgb.b);
       setTargetColor(name);
+      saveSettings({ targetColor: name });
     }
     setPickingColor(false);
     setCrosshairPos(null);
@@ -360,6 +422,7 @@ export default function VisionPage() {
     setPickedRgb({ r: color.r, g: color.g, b: color.b });
     setTargetColor(color.name);
     setColorLabel(color.name);
+    saveSettings({ targetColor: color.name });
     customRangeRef.current = {
       hMin: Math.max(0, color.h - 20), hMax: Math.min(360, color.h + 20),
       sMin: Math.max(0, color.s - 30), sMax: Math.min(100, color.s + 30),
@@ -378,6 +441,7 @@ export default function VisionPage() {
     setScannedObjects([]);
     setSelectedForLock(null);
     setMode("scan");
+    saveSettings({ mode: "scan" });
     nextScanIdRef.current = 1;
   }, []);
 
@@ -535,7 +599,7 @@ export default function VisionPage() {
                 <p className={`text-xl font-bold font-mono ${fps > 20 ? 'text-green-400' : fps > 10 ? 'text-yellow-400' : 'text-red-400'}`}>{fps}</p>
               </div>
               <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
-                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Objects</p>
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Objek</p>
                 <p className="text-xl font-bold font-mono text-cyan-400">{objects.length}</p>
               </div>
               {useYolo && (
@@ -545,11 +609,11 @@ export default function VisionPage() {
                 </div>
               )}
               <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
-                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Battery</p>
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Baterai</p>
                 <p className={`text-xl font-bold font-mono ${robot.battery > 50 ? 'text-green-400' : robot.battery > 20 ? 'text-yellow-400' : 'text-red-400'}`}>{Math.round(robot.battery)}%</p>
               </div>
               <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
-                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">State</p>
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Status</p>
                 <p className="text-xl font-bold font-mono text-zinc-300 capitalize">{robot.state}</p>
               </div>
             </div>
@@ -625,13 +689,34 @@ export default function VisionPage() {
               />
             )}
 
+            {mode === "yolo" && (
+              <div className="bg-zinc-900/60 rounded-xl p-4 border border-zinc-800/50">
+                <h2 className="text-sm font-semibold mb-3 text-zinc-300">YOLO Detection</h2>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Sensitivity</label>
+                    <span className="text-xs font-mono text-zinc-400">{yoloConfidence}%</span>
+                  </div>
+                  <input
+                    type="range" min="10" max="90" value={yoloConfidence}
+                    onChange={(e) => setYoloConfidence(Number(e.target.value))}
+                    className="w-full accent-cyan-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
+                    <span>Lebih banyak deteksi</span>
+                    <span>Lebih sedikit false positive</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {(mode === "object" || mode === "all") && (
               <div className="bg-zinc-900/60 rounded-xl p-4 border border-zinc-800/50">
-                <h2 className="text-sm font-semibold mb-3 text-zinc-300">Object Detection</h2>
+                <h2 className="text-sm font-semibold mb-3 text-zinc-300">Deteksi Objek</h2>
                 <div className="space-y-3">
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Edge Threshold</label>
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Batas Tepi</label>
                       <span className="text-xs font-mono text-zinc-400">{edgeThreshold}</span>
                     </div>
                     <input
@@ -642,7 +727,7 @@ export default function VisionPage() {
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Min Area</label>
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Luas Minimum</label>
                       <span className="text-xs font-mono text-zinc-400">{objectMinArea}</span>
                     </div>
                     <input

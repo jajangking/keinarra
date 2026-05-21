@@ -46,12 +46,36 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
   const liveDetectionsRef = useRef<{ x: number; y: number; w: number; h: number; id: string; similarity?: number }[]>([]);
   const robotState = useRef<RobotState>({ ...initialRobotState });
   const videoElRef = useRef<HTMLVideoElement | null>(null);
-  const overlaySizeRef = useRef({ w: 0, h: 0 });
   const overlayCtxRef = useRef<CanvasRenderingContext2D | null>(null);
 
   useEffect(() => {
     optionsRef.current = options;
   }, [options]);
+
+  useEffect(() => {
+    const videoEl = document.querySelector("video");
+    if (!videoEl) return;
+    videoElRef.current = videoEl;
+
+    const syncSize = () => {
+      const overlay = overlayRef.current;
+      if (!overlay || !videoElRef.current) return;
+      const vw = videoElRef.current.clientWidth;
+      const vh = videoElRef.current.clientHeight;
+      if (vw > 0 && vh > 0 && (overlay.width !== vw || overlay.height !== vh)) {
+        overlay.width = vw;
+        overlay.height = vh;
+        overlayCtxRef.current = overlay.getContext("2d");
+      }
+    };
+
+    syncSize();
+
+    const observer = new ResizeObserver(syncSize);
+    observer.observe(videoEl);
+
+    return () => observer.disconnect();
+  }, []);
 
   const [objects, setObjects] = useState<DetectedObject[]>([]);
   const [robot, setRobot] = useState<RobotState>(initialRobotState);
@@ -61,13 +85,10 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
     const overlay = overlayRef.current;
     if (!overlay) return;
 
-    const sz = overlaySizeRef.current;
-    if (sz.w !== displayW || sz.h !== displayH) {
+    if (overlay.width !== displayW || overlay.height !== displayH) {
       overlay.width = displayW;
       overlay.height = displayH;
       overlayCtxRef.current = overlay.getContext("2d");
-      sz.w = displayW;
-      sz.h = displayH;
     }
 
     const octx = overlayCtxRef.current;
@@ -75,13 +96,32 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
 
     octx.clearRect(0, 0, displayW, displayH);
 
+    const videoEl = videoElRef.current;
+    if (!videoEl || videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return;
+
+    const videoAspect = videoEl.videoWidth / videoEl.videoHeight;
+    const displayAspect = displayW / displayH;
+
+    let drawW = displayW;
+    let drawH = displayH;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (displayAspect > videoAspect) {
+      drawH = displayW / videoAspect;
+      offsetY = (displayH - drawH) / 2;
+    } else {
+      drawW = displayH * videoAspect;
+      offsetX = (displayW - drawW) / 2;
+    }
+
+    const scaleX = drawW / W;
+    const scaleY = drawH / H;
+
     if (detected.length === 0) {
       octx.fillStyle = "rgba(0, 255, 0, 0.05)";
       octx.fillRect(0, 0, displayW, displayH);
     }
-
-    const scaleX = displayW / W;
-    const scaleY = displayH / H;
 
     for (const obj of detected) {
       const c = obj.color && COLOR_MAP[obj.color]
@@ -89,33 +129,40 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
         : obj.label === "Motion" ? "#00ffff"
         : obj.label === "Object" ? "#ffffff"
         : "#00ff00";
-      const ox = obj.x * scaleX;
-      const oy = obj.y * scaleY;
-      const ow = obj.w * scaleX;
-      const oh = obj.h * scaleY;
+
+      const pad = 4;
+      const ox = obj.x * scaleX + offsetX - pad;
+      const oy = obj.y * scaleY + offsetY - pad;
+      const ow = obj.w * scaleX + pad * 2;
+      const oh = obj.h * scaleY + pad * 2;
+
       octx.strokeStyle = c;
-      octx.lineWidth = 3;
-      octx.shadowColor = c;
-      octx.shadowBlur = 6;
+      octx.lineWidth = 2;
       octx.strokeRect(ox, oy, ow, oh);
-      octx.shadowBlur = 0;
+
+      const label = `${obj.label}`;
+      const detail = obj.similarity !== undefined ? `${Math.round(obj.similarity)}%` : `${Math.round(obj.w)}×${Math.round(obj.h)}`;
+      const fullLabel = `${label} ${detail}`;
+
+      octx.font = "bold 12px monospace";
+      const textW = octx.measureText(fullLabel).width;
+      const bgH = 18;
 
       octx.fillStyle = c;
-      octx.font = "bold 16px monospace";
-      octx.fillText(`${obj.id} ${obj.label}`, ox + 2, oy - 6);
-      const extraText = obj.similarity !== undefined ? `${Math.round(obj.similarity)}%` : `${Math.round(obj.w)}x${Math.round(obj.h)}`;
-      octx.fillText(extraText, ox + 2, oy + oh + 18);
+      octx.fillRect(ox, oy - bgH - 2, textW + 8, bgH);
+      octx.fillStyle = "#000";
+      octx.fillText(fullLabel, ox + 4, oy - 6);
 
       const cx = ox + ow / 2;
       const cy = oy + oh / 2;
       octx.beginPath();
-      octx.arc(cx, cy, 5, 0, Math.PI * 2);
+      octx.arc(cx, cy, 3, 0, Math.PI * 2);
       octx.fillStyle = c;
       octx.fill();
     }
 
-    const rx = currentRobot.x * scaleX;
-    const ry = currentRobot.y * scaleY;
+    const rx = currentRobot.x * scaleX + offsetX;
+    const ry = currentRobot.y * scaleY + offsetY;
     const rSize = 20 * scaleX;
 
     octx.save();
@@ -148,7 +195,7 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
       octx.setLineDash([4, 4]);
       octx.beginPath();
       octx.moveTo(rx, ry);
-      octx.lineTo(currentRobot.targetX * scaleX, currentRobot.targetY * scaleY);
+      octx.lineTo((currentRobot.targetX * scaleX) + offsetX, (currentRobot.targetY * scaleY) + offsetY);
       octx.stroke();
       octx.setLineDash([]);
     }
@@ -160,7 +207,7 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
           octx.strokeStyle = target.color;
           octx.lineWidth = 3;
           octx.beginPath();
-          octx.arc(target.x * scaleX, target.y * scaleY, target.radius * scaleX, 0, Math.PI * 2);
+          octx.arc((target.x * scaleX) + offsetX, (target.y * scaleY) + offsetY, target.radius * scaleX, 0, Math.PI * 2);
           octx.stroke();
 
           octx.fillStyle = target.color + "33";
@@ -169,7 +216,7 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
           octx.fillStyle = target.color;
           octx.font = "bold 16px monospace";
           octx.textAlign = "center";
-          octx.fillText("TARGET", target.x * scaleX, target.y * scaleY + 5);
+          octx.fillText("TARGET", (target.x * scaleX) + offsetX, (target.y * scaleY) + offsetY + 5);
           octx.textAlign = "left";
         }
       }
@@ -213,17 +260,11 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
       setObjects(detected);
     }
 
-    if (!videoElRef.current) {
-      videoElRef.current = document.querySelector("video");
-    }
     const videoEl = videoElRef.current;
-    const container = containerRef.current;
-    const dw = videoEl?.clientWidth || container?.clientWidth || W;
-    const dh = videoEl?.clientHeight || container?.clientHeight || H;
-    if (dw > 0 && dh > 0) {
-      renderOverlay(detected, updatedRobot, dw, dh);
+    if (videoEl && videoEl.clientWidth > 0 && videoEl.clientHeight > 0) {
+      renderOverlay(detected, updatedRobot, videoEl.clientWidth, videoEl.clientHeight);
     }
-  }, [containerRef, renderOverlay]);
+  }, [renderOverlay]);
 
   return { overlayRef, handleFrame, objects, robot, setRobot, liveDetectionsRef };
 }

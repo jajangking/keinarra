@@ -3,10 +3,11 @@ import { useRef, useState, useCallback, useEffect } from "react";
 interface UseCameraOptions {
   width?: number;
   height?: number;
+  targetFps?: number;
   onFrame?: (frame: ImageData) => void;
 }
 
-export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptions = {}) {
+export function useCamera({ width = 640, height = 480, targetFps = 25, onFrame }: UseCameraOptions = {}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -17,6 +18,12 @@ export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptio
   const [fps, setFps] = useState(0);
   const fpsFramesRef = useRef(0);
   const fpsLastTimeRef = useRef(0);
+  const lastFrameTimeRef = useRef(0);
+  const frameIntervalRef = useRef(1000 / targetFps);
+
+  useEffect(() => {
+    frameIntervalRef.current = 1000 / targetFps;
+  }, [targetFps]);
 
   useEffect(() => {
     onFrameRef.current = onFrame;
@@ -33,6 +40,17 @@ export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptio
         animFrameRef.current = requestAnimationFrame(loop);
         return;
       }
+
+      const now = performance.now();
+      const elapsed = now - lastFrameTimeRef.current;
+
+      if (elapsed < frameIntervalRef.current - 1) {
+        animFrameRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
+      lastFrameTimeRef.current = now - (elapsed - frameIntervalRef.current);
+
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (!ctxRef.current) {
@@ -55,7 +73,6 @@ export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptio
       onFrameRef.current(frame);
 
       fpsFramesRef.current++;
-      const now = performance.now();
       if (now - fpsLastTimeRef.current >= 500) {
         setFps(Math.round(fpsFramesRef.current * 1000 / (now - fpsLastTimeRef.current)));
         fpsFramesRef.current = 0;
@@ -67,6 +84,7 @@ export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptio
 
     fpsFramesRef.current = 0;
     fpsLastTimeRef.current = performance.now();
+    lastFrameTimeRef.current = 0;
     animFrameRef.current = requestAnimationFrame(loop);
 
     return () => {

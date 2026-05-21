@@ -138,14 +138,8 @@ export function VideoFeed({
       <div ref={videoWrapperRef} className="relative inline-block w-full" style={{ isolation: 'isolate' }}>
         <video ref={videoRef} className="block w-full h-auto" style={{ position: 'relative', zIndex: 1 }} playsInline />
 
-        {/* Grid overlay */}
-        <div className="absolute inset-0 pointer-events-none opacity-[0.04]" style={{ zIndex: 3, backgroundImage: 'linear-gradient(rgba(255,255,255,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.3) 1px, transparent 1px)', backgroundSize: '25% 25%' }} />
-
-        {/* Scan line effect */}
-        <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 3, background: 'linear-gradient(transparent 50%, rgba(0,0,0,0.03) 50%)', backgroundSize: '100% 4px' }} />
-
-        {/* Canvas overlay for detections */}
-        <canvas ref={overlayRef} className="absolute top-0 left-0 w-full h-full pointer-events-none" style={{ zIndex: 4 }} />
+        {/* Canvas overlay - sized by attributes, positioned over video */}
+        <canvas ref={overlayRef} className="absolute top-0 left-0 pointer-events-none" style={{ zIndex: 4 }} />
 
         {/* HUD Top Bar */}
         <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-3 py-2 pointer-events-none" style={{ zIndex: 10, background: 'linear-gradient(to bottom, rgba(0,0,0,0.6), transparent)' }}>

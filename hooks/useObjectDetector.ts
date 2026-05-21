@@ -45,6 +45,8 @@ interface UseObjectDetectorOptions {
   confidenceThreshold?: number;
   classes?: string[] | null;
   onDetections?: (detections: YoloDetection[]) => void;
+  targetWidth?: number;
+  targetHeight?: number;
 }
 
 const COLOR_MAP: Record<string, string> = {
@@ -81,6 +83,8 @@ export function useObjectDetector({
   confidenceThreshold = 0.4,
   classes = null,
   onDetections,
+  targetWidth = 640,
+  targetHeight = 480,
 }: UseObjectDetectorOptions = {}) {
   const detectorRef = useRef<ObjectDetectorInstance | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -92,8 +96,10 @@ export function useObjectDetector({
   const animFrameRef = useRef<number>(0);
   const frameCountRef = useRef(0);
   const lastFpsTimeRef = useRef(0);
+  const lastDetectTimeRef = useRef(0);
   const nextIdRef = useRef(1);
   const detectFnRef = useRef<((video: HTMLVideoElement) => void) | null>(null);
+  const detectIntervalMs = 100;
 
   useEffect(() => {
     if (!enabled) return;
@@ -106,14 +112,12 @@ export function useObjectDetector({
 
         const detectorConfig: Record<string, unknown> = {
           confidence: confidenceThreshold,
-          nmsThreshold: 0.45,
-          inputSize: [320, 320],
+          cache: true,
+          classes: classes ?? [],
           detectorType: "mediapipe",
           mediaPipeModelPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite",
           mediaPipeScoreThreshold: confidenceThreshold,
-          mediaPipeMaxResults: -1,
-          cache: true,
-          classes: classes ?? [],
+          mediaPipeMaxResults: 50,
         };
 
         const detector = new ObjectDetector(detectorConfig);
@@ -151,6 +155,13 @@ export function useObjectDetector({
       return;
     }
 
+    const now = performance.now();
+    if (now - lastDetectTimeRef.current < detectIntervalMs) {
+      animFrameRef.current = requestAnimationFrame(() => detectFnRef.current?.(video));
+      return;
+    }
+    lastDetectTimeRef.current = now;
+
     try {
       const results = await detectorRef.current.detectFromVideo(video);
 
@@ -159,14 +170,18 @@ export function useObjectDetector({
         return;
       }
 
+      const vw = video.videoWidth || targetWidth;
+      const vh = video.videoHeight || targetHeight;
+      const sx = targetWidth / vw;
+      const sy = targetHeight / vh;
       const mapped: YoloDetection[] = results.map((r: RtmlibDetection) => ({
         id: `yolo-${nextIdRef.current++}`,
         label: r.className,
         confidence: r.confidence,
-        x: r.bbox.x1,
-        y: r.bbox.y1,
-        w: r.bbox.x2 - r.bbox.x1,
-        h: r.bbox.y2 - r.bbox.y1,
+        x: r.bbox.x1 * sx,
+        y: r.bbox.y1 * sy,
+        w: (r.bbox.x2 - r.bbox.x1) * sx,
+        h: (r.bbox.y2 - r.bbox.y1) * sy,
         classId: r.classId,
       }));
 
@@ -174,11 +189,11 @@ export function useObjectDetector({
       onDetections?.(mapped);
 
       frameCountRef.current++;
-      const now = performance.now();
-      if (now - lastFpsTimeRef.current >= 1000) {
+      const fpsNow = performance.now();
+      if (fpsNow - lastFpsTimeRef.current >= 1000) {
         setFps(frameCountRef.current);
         frameCountRef.current = 0;
-        lastFpsTimeRef.current = now;
+        lastFpsTimeRef.current = fpsNow;
       }
     } catch (err) {
       console.warn("[YOLO] Frame detection error:", err);

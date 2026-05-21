@@ -94,20 +94,39 @@ function computeColorBounds(targetColor: string, customRange: CustomColorRange |
 }
 
 function checkColorInline(r: number, g: number, b: number, bounds: ColorBounds): boolean {
-  const rf = r * 0.003921569, gf = g * 0.003921569, bf = b * 0.003921569;
-  const mx = rf > gf ? (rf > bf ? rf : bf) : (gf > bf ? gf : bf);
-  const mn = rf < gf ? (rf < bf ? rf : bf) : (gf < bf ? gf : bf);
+  const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
   const d = mx - mn;
   const s = mx > 0 ? (d * 100) / mx : 0;
   if (s < bounds.sMin || s > bounds.sMax) return false;
-  const v = mx * 100;
+  const v = mx;
   if (v < bounds.vMin || v > bounds.vMax) return false;
   let h = 0;
   if (d > 0) {
-    if (mx === rf) h = ((gf - bf) / d + (gf < bf ? 6 : 0)) * 60;
-    else if (mx === gf) h = ((bf - rf) / d + 2) * 60;
-    else h = ((rf - gf) / d + 4) * 60;
+    if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+    else if (mx === g) h = ((b - r) / d + 2) * 60;
+    else h = ((r - g) / d + 4) * 60;
   }
+  if (bounds.wrapH) return h >= bounds.hMin || h <= bounds.hMax;
+  return h >= bounds.hMin && h <= bounds.hMax;
+}
+
+function checkColorInlineFast(r: number, g: number, b: number, bounds: ColorBounds): boolean {
+  const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  if (mx < bounds.vMin || mx > bounds.vMax) return false;
+  const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+  const d = mx - mn;
+  const s = mx > 0 ? (d * 10000) / mx : 0;
+  const sMin100 = bounds.sMin * 100;
+  const sMax100 = bounds.sMax * 100;
+  if (s < sMin100 || s > sMax100) return false;
+  if (d === 0) return bounds.hMin === 0 && bounds.hMax === 360;
+  let h: number;
+  if (mx === r) h = ((g - b) * 60) / d + (g < b ? 360 : 0);
+  else if (mx === g) h = ((b - r) * 60) / d + 120;
+  else h = ((r - g) * 60) / d + 240;
+  if (h < 0) h += 360;
+  if (h > 360) h -= 360;
   if (bounds.wrapH) return h >= bounds.hMin || h <= bounds.hMax;
   return h >= bounds.hMin && h <= bounds.hMax;
 }
@@ -128,8 +147,9 @@ export function processFrame(
   if (mode === "color" || mode === "all") {
     const bounds = computeColorBounds(targetColor, customRange, colorTolerance);
     const mask = new Uint8Array(TOTAL);
+    const checkFn = checkColorInlineFast;
     for (let i = 0; i < data.length; i += 4) {
-      if (checkColorInline(data[i], data[i + 1], data[i + 2], bounds)) mask[i >> 2] = 255;
+      if (checkFn(data[i], data[i + 1], data[i + 2], bounds)) mask[i >> 2] = 255;
     }
     const regions = findContours(mask, W, H, colorMinArea);
     const label = colorLabel || (customRange ? `RGB(${customRange.avgH.toFixed(0)}, ${customRange.avgS.toFixed(0)}, ${customRange.avgV.toFixed(0)})` : `Color: ${targetColor}`);
@@ -158,8 +178,8 @@ export function processFrame(
 
   if (mode === "object" || mode === "all" || mode === "scan") {
     const gray = new Uint8Array(TOTAL);
-    for (let i = 0; i < data.length; i += 4) {
-      gray[i >> 2] = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+    for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+      gray[j] = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
     }
     const edgeMask = new Uint8Array(TOTAL);
     const threshSq = edgeThreshold * edgeThreshold;

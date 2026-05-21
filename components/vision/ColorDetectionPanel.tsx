@@ -38,10 +38,10 @@ export function ColorDetectionPanel({
 
   return (
     <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
-      <h2 className="text-lg font-semibold mb-3">Color Detection</h2>
+      <h2 className="text-lg font-semibold mb-3">Deteksi Warna</h2>
       <div className="space-y-3">
         <div>
-          <label className="text-sm text-zinc-400 block mb-1">Preset Colors</label>
+          <label className="text-sm text-zinc-400 block mb-1">Warna Preset</label>
           <div className="flex flex-wrap gap-2">
             {[
               { name: "red", bg: "#ef4444" },
@@ -101,7 +101,7 @@ export function ColorDetectionPanel({
             pickingColor ? "bg-yellow-600 text-white animate-pulse" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
           }`}
         >
-          {pickingColor ? "Klik pada video untuk pick warna..." : "Pick Color dari Kamera"}
+          {pickingColor ? "Klik pada video untuk pilih warna..." : "Pilih Warna dari Kamera"}
         </button>
 
         {pickedRgb && (
@@ -128,7 +128,7 @@ export function ColorDetectionPanel({
                 onClick={onClearPicked}
                 className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
               >
-                Clear
+                Hapus
               </button>
             </div>
 
@@ -170,7 +170,7 @@ export function ColorDetectionPanel({
 
         {savedColors.length > 0 && (
           <div>
-            <label className="text-sm text-zinc-400 block mb-2">Saved Colors</label>
+            <label className="text-sm text-zinc-400 block mb-2">Warna Tersimpan</label>
             <div className="space-y-1 max-h-40 overflow-y-auto">
               {savedColors.map((c) => (
                 <div
@@ -199,28 +199,28 @@ export function ColorDetectionPanel({
         )}
 
         <div>
-          <label className="text-sm text-zinc-400 block mb-1">HSV Tolerance: {colorTolerance}%</label>
+          <label className="text-sm text-zinc-400 block mb-1">Toleransi HSV: {colorTolerance}%</label>
           <input
             type="range" min="0" max="100" value={colorTolerance}
             onChange={(e) => onToleranceChange(Number(e.target.value))}
             className="w-full"
           />
           <div className="flex justify-between text-xs text-zinc-500 mt-1">
-            <span>Strict (narrow)</span>
-            <span>Loose (wide)</span>
+            <span>Ketat (sempit)</span>
+            <span>Longgar (lebar)</span>
           </div>
         </div>
 
         <div>
-          <label className="text-sm text-zinc-400 block mb-1">Min Area: {colorMinArea}px</label>
+          <label className="text-sm text-zinc-400 block mb-1">Luas Minimum: {colorMinArea}px</label>
           <input
             type="range" min="50" max="5000" step="50" value={colorMinArea}
             onChange={(e) => onMinAreaChange(Number(e.target.value))}
             className="w-full"
           />
           <div className="flex justify-between text-xs text-zinc-500 mt-1">
-            <span>Small blobs</span>
-            <span>Large blobs only</span>
+            <span>Blob kecil</span>
+            <span>Hanya blob besar</span>
           </div>
         </div>
       </div>
