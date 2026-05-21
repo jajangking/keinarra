@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from "react";
-import type { DetectedObject, RobotState, PlayTarget, RobotMode, DebugLogEntry, HybridProfile } from "@/lib/vision/types";
+import type { DetectedObject, RobotState, PlayTarget, RobotMode, DebugLogEntry } from "@/lib/vision/types";
 import type { CustomColorRange } from "@/lib/vision/color";
 import { processFrame } from "@/lib/vision/detection";
 import { updateRobot } from "@/lib/vision/robot";
@@ -10,18 +10,31 @@ const H = 480;
 interface UseVisionProcessorOptions {
   mode: string;
   targetColor: string;
-  colorThreshold: number;
+  colorTolerance: number;
+  colorMinArea: number;
   motionThreshold: number;
-  minMotionArea: number;
+  motionMinArea: number;
+  edgeThreshold: number;
+  objectMinArea: number;
   customRangeRef?: React.MutableRefObject<CustomColorRange | null>;
   colorLabel?: string | null;
-  hybridProfileRef?: React.MutableRefObject<HybridProfile | null>;
   robotMode: RobotMode;
   playTargets: PlayTarget[];
   onInteractionLog: (msg: string) => void;
   onScore: (delta: number) => void;
   onDebugLog: (log: DebugLogEntry) => void;
 }
+
+const initialRobotState: RobotState = {
+  x: W / 2, y: H / 2, angle: 0, speed: 0,
+  targetX: W / 2, targetY: H / 2, state: "idle", battery: 100,
+};
+
+const COLOR_MAP: Record<string, string> = {
+  red: "#ff0000", green: "#00ff00", blue: "#0000ff",
+  yellow: "#ffff00", orange: "#ff8800", custom: "#ff00ff",
+  cyan: "#00ffff", white: "#ffffff",
+};
 
 export function useVisionProcessor(options: UseVisionProcessorOptions, containerRef: React.RefObject<HTMLDivElement | null>) {
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -31,72 +44,35 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
   const nextIdRef = useRef(1);
   const optionsRef = useRef(options);
   const liveDetectionsRef = useRef<{ x: number; y: number; w: number; h: number; id: string; similarity?: number }[]>([]);
-  const robotState = useRef<RobotState>({
-    x: W / 2, y: H / 2, angle: 0, speed: 0,
-    targetX: W / 2, targetY: H / 2, state: "idle", battery: 100,
-  });
+  const robotState = useRef<RobotState>({ ...initialRobotState });
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const overlaySizeRef = useRef({ w: 0, h: 0 });
+  const overlayCtxRef = useRef<CanvasRenderingContext2D | null>(null);
 
   useEffect(() => {
     optionsRef.current = options;
   }, [options]);
 
   const [objects, setObjects] = useState<DetectedObject[]>([]);
-  const [robot, setRobot] = useState<RobotState>(robotState.current);
+  const [robot, setRobot] = useState<RobotState>(initialRobotState);
   const frameCounterRef = useRef(0);
-
-  const handleFrame = useCallback((frame: ImageData) => {
-    const opts = optionsRef.current;
-    const detected = processFrame(frame, {
-      mode: opts.mode,
-      targetColor: opts.targetColor,
-      colorThreshold: opts.colorThreshold,
-      motionThreshold: opts.motionThreshold,
-      minMotionArea: opts.minMotionArea,
-      customRange: opts.customRangeRef?.current ?? null,
-      colorLabel: opts.colorLabel,
-      hybridProfile: opts.hybridProfileRef?.current ?? null,
-      trackedObjectsRef,
-      frameCountRef,
-      nextIdRef,
-      prevFrameRef,
-      onDebugLog: opts.onDebugLog,
-    });
-
-    const updatedRobot = updateRobot(detected, robotState.current, {
-      robotMode: opts.robotMode,
-      playTargets: opts.playTargets,
-      onInteractionLog: opts.onInteractionLog,
-      onScore: opts.onScore,
-    });
-
-    robotState.current = updatedRobot;
-    frameCounterRef.current++;
-    liveDetectionsRef.current = detected.map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h, id: o.id, similarity: o.similarity }));
-
-    if (frameCounterRef.current % 3 === 0) {
-      queueMicrotask(() => {
-        setRobot({ ...updatedRobot });
-        setObjects([...detected]);
-      });
-    }
-
-    const container = containerRef.current;
-    const videoEl = document.querySelector("video") as HTMLVideoElement | null;
-    const dw = videoEl?.clientWidth || container?.clientWidth || W;
-    const dh = videoEl?.clientHeight || container?.clientHeight || H;
-    if (dw > 0 && dh > 0) {
-      renderOverlay(detected, updatedRobot, dw, dh);
-    }
-  }, []);
 
   const renderOverlay = useCallback((detected: DetectedObject[], currentRobot: RobotState, displayW: number, displayH: number) => {
     const overlay = overlayRef.current;
     if (!overlay) return;
-    const octx = overlay.getContext("2d");
+
+    const sz = overlaySizeRef.current;
+    if (sz.w !== displayW || sz.h !== displayH) {
+      overlay.width = displayW;
+      overlay.height = displayH;
+      overlayCtxRef.current = overlay.getContext("2d");
+      sz.w = displayW;
+      sz.h = displayH;
+    }
+
+    const octx = overlayCtxRef.current;
     if (!octx) return;
 
-    overlay.width = displayW;
-    overlay.height = displayH;
     octx.clearRect(0, 0, displayW, displayH);
 
     if (detected.length === 0) {
@@ -107,15 +83,9 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
     const scaleX = displayW / W;
     const scaleY = displayH / H;
 
-    const colorMap: Record<string, string> = {
-      red: "#ff0000", green: "#00ff00", blue: "#0000ff",
-      yellow: "#ffff00", orange: "#ff8800", custom: "#ff00ff",
-      cyan: "#00ffff", white: "#ffffff",
-    };
-
     for (const obj of detected) {
-      const c = obj.color && colorMap[obj.color]
-        ? colorMap[obj.color]
+      const c = obj.color && COLOR_MAP[obj.color]
+        ? COLOR_MAP[obj.color]
         : obj.label === "Motion" ? "#00ffff"
         : obj.label === "Object" ? "#ffffff"
         : "#00ff00";
@@ -205,6 +175,55 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
       }
     }
   }, []);
+
+  const handleFrame = useCallback((frame: ImageData) => {
+    const opts = optionsRef.current;
+
+    const detected = processFrame(frame, {
+      mode: opts.mode,
+      targetColor: opts.targetColor,
+      colorTolerance: opts.colorTolerance,
+      colorMinArea: opts.colorMinArea,
+      motionThreshold: opts.motionThreshold,
+      motionMinArea: opts.motionMinArea,
+      edgeThreshold: opts.edgeThreshold,
+      objectMinArea: opts.objectMinArea,
+      customRange: opts.customRangeRef?.current ?? null,
+      colorLabel: opts.colorLabel,
+      trackedObjectsRef,
+      frameCountRef,
+      nextIdRef,
+      prevFrameRef,
+      onDebugLog: opts.onDebugLog,
+    });
+
+    const updatedRobot = updateRobot(detected, robotState.current, {
+      robotMode: opts.robotMode,
+      playTargets: opts.playTargets,
+      onInteractionLog: opts.onInteractionLog,
+      onScore: opts.onScore,
+    });
+
+    robotState.current = updatedRobot;
+    frameCounterRef.current++;
+    liveDetectionsRef.current = detected;
+
+    if (frameCounterRef.current % 3 === 0) {
+      setRobot(updatedRobot);
+      setObjects(detected);
+    }
+
+    if (!videoElRef.current) {
+      videoElRef.current = document.querySelector("video");
+    }
+    const videoEl = videoElRef.current;
+    const container = containerRef.current;
+    const dw = videoEl?.clientWidth || container?.clientWidth || W;
+    const dh = videoEl?.clientHeight || container?.clientHeight || H;
+    if (dw > 0 && dh > 0) {
+      renderOverlay(detected, updatedRobot, dw, dh);
+    }
+  }, [containerRef, renderOverlay]);
 
   return { overlayRef, handleFrame, objects, robot, setRobot, liveDetectionsRef };
 }

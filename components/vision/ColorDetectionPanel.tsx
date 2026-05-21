@@ -1,14 +1,17 @@
 import { useState } from "react";
 import type { SavedColor } from "@/lib/vision/saved-colors";
+import { rgbToHsv } from "@/lib/vision/color";
 
 interface ColorDetectionPanelProps {
   targetColor: string;
-  colorThreshold: number;
+  colorTolerance: number;
+  colorMinArea: number;
   pickingColor: boolean;
   pickedRgb: { r: number; g: number; b: number } | null;
   savedColors: SavedColor[];
   onColorChange: (c: string) => void;
-  onThresholdChange: (v: number) => void;
+  onToleranceChange: (v: number) => void;
+  onMinAreaChange: (v: number) => void;
   onPickColor: () => void;
   onClearPicked: () => void;
   onSaveColor: (name: string) => void;
@@ -17,11 +20,10 @@ interface ColorDetectionPanelProps {
 }
 
 export function ColorDetectionPanel({
-  targetColor, colorThreshold, pickingColor, pickedRgb, savedColors,
-  onColorChange, onThresholdChange, onPickColor, onClearPicked,
+  targetColor, colorTolerance, colorMinArea, pickingColor, pickedRgb, savedColors,
+  onColorChange, onToleranceChange, onMinAreaChange, onPickColor, onClearPicked,
   onSaveColor, onSelectSaved, onDeleteSaved,
 }: ColorDetectionPanelProps) {
-  const sensitivity = Math.round(((500 - colorThreshold) / 490) * 100);
   const [saveName, setSaveName] = useState("");
   const [showSaveInput, setShowSaveInput] = useState(false);
 
@@ -32,21 +34,62 @@ export function ColorDetectionPanel({
     setShowSaveInput(false);
   };
 
+  const pickedHsv = pickedRgb ? rgbToHsv(pickedRgb.r, pickedRgb.g, pickedRgb.b) : null;
+
   return (
     <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
       <h2 className="text-lg font-semibold mb-3">Color Detection</h2>
       <div className="space-y-3">
         <div>
           <label className="text-sm text-zinc-400 block mb-1">Preset Colors</label>
-          <div className="flex gap-2">
-            {["red", "green", "blue", "yellow", "orange"].map((c) => (
+          <div className="flex flex-wrap gap-2">
+            {[
+              { name: "red", bg: "#ef4444" },
+              { name: "orange", bg: "#f97316" },
+              { name: "yellow", bg: "#eab308" },
+              { name: "green", bg: "#22c55e" },
+              { name: "blue", bg: "#3b82f6" },
+              { name: "cyan", bg: "#06b6d4" },
+              { name: "pink", bg: "#ec4899" },
+              { name: "purple", bg: "#a855f7" },
+              { name: "white", bg: "#ffffff" },
+              { name: "black", bg: "#000000" },
+              { name: "brown", bg: "#92400e" },
+              { name: "gold", bg: "#fbbf24" },
+              { name: "lime", bg: "#84cc16" },
+              { name: "navy", bg: "#1e3a8a" },
+              { name: "magenta", bg: "#d946ef" },
+              { name: "teal", bg: "#14b8a6" },
+              { name: "coral", bg: "#f87171" },
+              { name: "gray", bg: "#6b7280" },
+              { name: "silver", bg: "#9ca3af" },
+              { name: "indigo", bg: "#6366f1" },
+              { name: "amber", bg: "#f59e0b" },
+              { name: "olive", bg: "#65740a" },
+              { name: "peach", bg: "#ffb4a2" },
+              { name: "crimson", bg: "#dc143c" },
+              { name: "scarlet", bg: "#ff2400" },
+              { name: "maroon", bg: "#800000" },
+              { name: "emerald", bg: "#10b981" },
+              { name: "sky", bg: "#87ceeb" },
+              { name: "azure", bg: "#007fff" },
+              { name: "aqua", bg: "#00ffff" },
+              { name: "lavender", bg: "#e6e6fa" },
+              { name: "plum", bg: "#8e4585" },
+              { name: "tangerine", bg: "#ff9966" },
+              { name: "rust", bg: "#b7410e" },
+              { name: "lemon", bg: "#fff44f" },
+              { name: "mint", bg: "#98ff98" },
+              { name: "rose", bg: "#ff007f" },
+            ].map(({ name, bg }) => (
               <button
-                key={c}
-                onClick={() => onColorChange(c)}
+                key={name}
+                onClick={() => onColorChange(name)}
                 className={`w-8 h-8 rounded-full border-2 ${
-                  targetColor === c ? "border-white scale-110" : "border-zinc-600"
+                  targetColor === name ? "border-white scale-110" : "border-zinc-600"
                 }`}
-                style={{ backgroundColor: c }}
+                style={{ backgroundColor: bg }}
+                title={name}
               />
             ))}
           </div>
@@ -75,6 +118,11 @@ export function ColorDetectionPanel({
                 <p className="text-xs text-zinc-400">
                   #{pickedRgb.r.toString(16).padStart(2, "0")}{pickedRgb.g.toString(16).padStart(2, "0")}{pickedRgb.b.toString(16).padStart(2, "0")} • {targetColor}
                 </p>
+                {pickedHsv && (
+                  <p className="text-xs text-cyan-400 font-mono">
+                    HSV({pickedHsv[0].toFixed(0)}, {pickedHsv[1].toFixed(0)}%, {pickedHsv[2].toFixed(0)}%)
+                  </p>
+                )}
               </div>
               <button
                 onClick={onClearPicked}
@@ -151,19 +199,28 @@ export function ColorDetectionPanel({
         )}
 
         <div>
-          <label className="text-sm text-zinc-400 block mb-1">Sensitivity: {sensitivity}%</label>
+          <label className="text-sm text-zinc-400 block mb-1">HSV Tolerance: {colorTolerance}%</label>
           <input
-            type="range" min="0" max="100" value={sensitivity}
-            onChange={(e) => {
-              const s = Number(e.target.value);
-              const minArea = Math.round(500 - (s / 100) * 490);
-              onThresholdChange(minArea);
-            }}
+            type="range" min="0" max="100" value={colorTolerance}
+            onChange={(e) => onToleranceChange(Number(e.target.value))}
             className="w-full"
           />
           <div className="flex justify-between text-xs text-zinc-500 mt-1">
-            <span>Strict</span>
-            <span>Sensitive</span>
+            <span>Strict (narrow)</span>
+            <span>Loose (wide)</span>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-sm text-zinc-400 block mb-1">Min Area: {colorMinArea}px</label>
+          <input
+            type="range" min="50" max="5000" step="50" value={colorMinArea}
+            onChange={(e) => onMinAreaChange(Number(e.target.value))}
+            className="w-full"
+          />
+          <div className="flex justify-between text-xs text-zinc-500 mt-1">
+            <span>Small blobs</span>
+            <span>Large blobs only</span>
           </div>
         </div>
       </div>

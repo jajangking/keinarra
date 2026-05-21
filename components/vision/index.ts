@@ -7,4 +7,5 @@ export { InteractionLog } from "./InteractionLog";
 export { DetectedObjectsList } from "./DetectedObjectsList";
 export { DebugLogPanel } from "./DebugLogPanel";
 export { VideoFeed } from "./VideoFeed";
-export { HybridTrainingPanel } from "./HybridTrainingPanel";
+export { AIChatPanel } from "./AIChatPanel";
+export { ObjectScanPanel } from "./ObjectScanPanel";

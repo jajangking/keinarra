@@ -1,4 +1,4 @@
-export type DetectionMode = "color" | "motion" | "object" | "custom" | "hybrid" | "all";
+export type DetectionMode = "color" | "motion" | "object" | "all" | "scan" | "yolo";
 export type RobotMode = "follow" | "interact" | "play";
 
 export interface DetectedObject {
@@ -48,33 +48,4 @@ export interface DebugLogEntry {
   timestamp?: number;
 }
 
-export interface HybridSample {
-  id: string;
-  hMin: number; hMax: number;
-  sMin: number; sMax: number;
-  vMin: number; vMax: number;
-  edgeDensity: number;
-  aspectRatio: number;
-  solidity: number;
-  cornerCount: number;
-  capturedAt: number;
-}
 
-export interface HybridProfile {
-  id: string;
-  name: string;
-  hMin: number; hMax: number;
-  sMin: number; sMax: number;
-  vMin: number; vMax: number;
-  avgEdgeDensity: number;
-  edgeDensityTolerance: number;
-  avgAspectRatio: number;
-  aspectRatioTolerance: number;
-  avgSolidity: number;
-  solidityTolerance: number;
-  avgCornerCount: number;
-  cornerCountTolerance: number;
-  samples: HybridSample[];
-  thumbnail: string;
-  createdAt: number;
-}

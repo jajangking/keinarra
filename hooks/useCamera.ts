@@ -10,10 +10,13 @@ export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptio
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const animFrameRef = useRef<number>(0);
   const onFrameRef = useRef(onFrame);
   const [isRunning, setIsRunning] = useState(false);
   const [fps, setFps] = useState(0);
+  const fpsFramesRef = useRef(0);
+  const fpsLastTimeRef = useRef(0);
 
   useEffect(() => {
     onFrameRef.current = onFrame;
@@ -32,26 +35,38 @@ export function useCamera({ width = 640, height = 480, onFrame }: UseCameraOptio
       }
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctxRef.current) {
+        ctxRef.current = canvas.getContext("2d", { willReadFrequently: true });
+      }
+      const ctx = ctxRef.current;
       if (!ctx || video.readyState < 2) {
         animFrameRef.current = requestAnimationFrame(loop);
         return;
       }
 
-      const startTime = performance.now();
-      canvas.width = width;
-      canvas.height = height;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
       ctx.drawImage(video, 0, 0, width, height);
       const frame = ctx.getImageData(0, 0, width, height);
 
       onFrameRef.current(frame);
 
-      const elapsed = performance.now() - startTime;
-      setFps(Math.round(1000 / Math.max(elapsed, 1)));
+      fpsFramesRef.current++;
+      const now = performance.now();
+      if (now - fpsLastTimeRef.current >= 500) {
+        setFps(Math.round(fpsFramesRef.current * 1000 / (now - fpsLastTimeRef.current)));
+        fpsFramesRef.current = 0;
+        fpsLastTimeRef.current = now;
+      }
 
       animFrameRef.current = requestAnimationFrame(loop);
     };
 
+    fpsFramesRef.current = 0;
+    fpsLastTimeRef.current = performance.now();
     animFrameRef.current = requestAnimationFrame(loop);
 
     return () => {

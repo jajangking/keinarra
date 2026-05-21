@@ -1,20 +1,27 @@
 "use client";
 
 import { useRef, useState, useCallback, useEffect } from "react";
-import type { DetectionMode, RobotMode, PlayTarget, DebugLogEntry, HybridProfile, HybridSample } from "@/lib/vision/types";
+import type { DetectionMode, RobotMode, PlayTarget, DebugLogEntry } from "@/lib/vision/types";
 import type { CustomColorRange } from "@/lib/vision/color";
 import type { SavedColor } from "@/lib/vision/saved-colors";
+import type { ScannedObject, SavedObject, ObjectSignature } from "@/lib/vision/objects";
 import { useCamera } from "@/hooks/useCamera";
 import { useVisionProcessor } from "@/hooks/useVisionProcessor";
+import { useGroqAI } from "@/hooks/useGroqAI";
+import { useObjectDetector, getYoloColor } from "@/hooks/useObjectDetector";
+import { getDefaultModel, type VisionContext } from "@/lib/groq";
 import { closestNamedColor, createCustomRangeFromArea, rgbToHsv } from "@/lib/vision/color";
 import { loadSavedColors, addSavedColor, removeSavedColor } from "@/lib/vision/saved-colors";
-import { loadHybridProfiles, addHybridProfile, removeHybridProfile } from "@/lib/vision/hybrid-storage";
-import { computeEdgeDensity, computeSolidity, approximateCornerCount, findContours } from "@/lib/vision/image-processing";
 import {
-  StatsPanel, ModeSelector,
+  loadSavedObjects,
+  addSavedObject,
+  removeSavedObject,
+} from "@/lib/vision/objects";
+import {
+  ModeSelector,
   PlayModePanel, ColorDetectionPanel, MotionDetectionPanel,
   InteractionLog, DetectedObjectsList, DebugLogPanel,
-  VideoFeed, HybridTrainingPanel,
+  VideoFeed, AIChatPanel, ObjectScanPanel,
 } from "@/components/vision";
 
 const W = 640;
@@ -25,11 +32,15 @@ export default function VisionPage() {
   const [mode, setMode] = useState<DetectionMode>("all");
   const [robotMode, setRobotMode] = useState<RobotMode>("follow");
   const [targetColor, setTargetColor] = useState("red");
-  const [colorThreshold, setColorThreshold] = useState(100);
+
+  const [colorTolerance, setColorTolerance] = useState(50);
+  const [colorMinArea, setColorMinArea] = useState(200);
   const [motionThreshold, setMotionThreshold] = useState(30);
-  const [minMotionArea, setMinMotionArea] = useState(500);
+  const [motionMinArea, setMotionMinArea] = useState(500);
+  const [edgeThreshold, setEdgeThreshold] = useState(80);
+  const [objectMinArea, setObjectMinArea] = useState(1000);
+
   const [debugLog, setDebugLog] = useState<DebugLogEntry[]>([]);
-  const [showDebugLog, setShowDebugLog] = useState(false);
   const [playTargets, setPlayTargets] = useState<PlayTarget[]>([]);
   const [score, setScore] = useState(0);
   const [interactionLog, setInteractionLog] = useState<string[]>([]);
@@ -40,18 +51,36 @@ export default function VisionPage() {
   const [savedColors, setSavedColors] = useState<SavedColor[]>([]);
   const [colorLabel, setColorLabel] = useState<string | null>(null);
 
-  const [hybridPhase, setHybridPhase] = useState<"idle" | "training" | "testing" | "improving" | "done">("idle");
-  const [hybridSamples, setHybridSamples] = useState<HybridSample[]>([]);
-  const [hybridProfileName, setHybridProfileName] = useState("");
-  const [hybridProfiles, setHybridProfiles] = useState<HybridProfile[]>([]);
-  const [activeHybridProfile, setActiveHybridProfile] = useState<HybridProfile | null>(null);
-  const [dragRegion, setDragRegion] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const [detectedInRegion, setDetectedInRegion] = useState(false);
-  const [improveIteration, setImproveIteration] = useState(0);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scannedObjects, setScannedObjects] = useState<ScannedObject[]>([]);
+  const [selectedForLock, setSelectedForLock] = useState<string | null>(null);
+  const [savedObjects, setSavedObjects] = useState<SavedObject[]>([]);
+  const [lockedObjectId, setLockedObjectId] = useState<string | null>(null);
+
+  const nextScanIdRef = useRef(1);
+  const lastFrameRef = useRef<ImageData | null>(null);
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const isScanningRef = useRef(false);
+  const isRunningRef = useRef(false);
+  const scannedObjectsRef = useRef<ScannedObject[]>([]);
+
+  useEffect(() => {
+    scannedObjectsRef.current = scannedObjects;
+  }, [scannedObjects]);
+
+  const [groqApiKey, setGroqApiKey] = useState(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("groq_api_key") || "";
+    return "";
+  });
+
+  const [groqModel, setGroqModel] = useState(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("groq_model") || getDefaultModel();
+    return getDefaultModel();
+  });
 
   useEffect(() => {
     loadSavedColors().then(setSavedColors);
-    loadHybridProfiles().then(setHybridProfiles);
+    loadSavedObjects().then(setSavedObjects);
   }, []);
 
   const handleInteractionLog = useCallback((msg: string) => {
@@ -74,14 +103,13 @@ export default function VisionPage() {
   }, []);
 
   const processorHandleFrameRef = useRef<((frame: ImageData) => void) | null>(null);
-  const lastFrameRef = useRef<ImageData | null>(null);
   const customRangeRef = useRef<CustomColorRange | null>(null);
-  const hybridProfileRef = useRef<HybridProfile | null>(null);
-  const hybridDetectObjectsRef = useRef<{ x: number; y: number; w: number; h: number }[]>([]);
 
   const { overlayRef, handleFrame, objects, robot, setRobot } = useVisionProcessor({
-    mode, targetColor, colorThreshold, motionThreshold, minMotionArea,
-    customRangeRef, colorLabel, hybridProfileRef, robotMode, playTargets,
+    mode, targetColor, colorTolerance, colorMinArea,
+    motionThreshold, motionMinArea, edgeThreshold, objectMinArea,
+    customRangeRef, colorLabel,
+    robotMode, playTargets,
     onInteractionLog: handleInteractionLog,
     onScore: handleScore,
     onDebugLog: handleDebugLog,
@@ -91,20 +119,46 @@ export default function VisionPage() {
     processorHandleFrameRef.current = handleFrame;
   }, [handleFrame]);
 
-  useEffect(() => {
-    hybridProfileRef.current = activeHybridProfile;
-  }, [activeHybridProfile]);
-
-  useEffect(() => {
-    hybridDetectObjectsRef.current = objects
-      .filter(o => o.color === "custom" && o.label.includes(hybridProfileName || ""))
-      .map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h }));
-  }, [objects, hybridProfileName]);
-
   const { videoRef, canvasRef, isRunning, fps, start: startCamera, stop: stopCamera } = useCamera({
     width: W, height: H, onFrame: (frame: ImageData) => {
       lastFrameRef.current = frame;
       processorHandleFrameRef.current?.(frame);
+
+      if (isScanning && isRunning) {
+        const currentObjects = objects.filter(o => o.label === "Scan");
+        const newScanned: ScannedObject[] = [];
+        for (const obj of currentObjects) {
+          const existing = scannedObjectsRef.current.find(s => {
+            const dx = Math.abs(s.x - obj.x);
+            const dy = Math.abs(s.y - obj.y);
+            return dx < 30 && dy < 30;
+          });
+          if (!existing) {
+            const signature: ObjectSignature = {
+              avgR: 0, avgG: 0, avgB: 0,
+              avgH: 0, avgS: 0, avgV: 0,
+              stdR: 0, stdG: 0, stdB: 0,
+              widthHeightRatio: obj.w / (obj.h || 1),
+              area: obj.w * obj.h,
+              perimeter: 2 * (obj.w + obj.h),
+              circularity: 0,
+              edgeDensity: 0,
+            };
+            newScanned.push({
+              id: `scan-${nextScanIdRef.current++}`,
+              x: obj.x, y: obj.y, w: obj.w, h: obj.h,
+              label: "Object",
+              confidence: 1,
+              signature,
+              thumbnail: "",
+              color: "#eab308",
+            });
+          }
+        }
+        if (newScanned.length > 0) {
+          setScannedObjects(prev => [...prev, ...newScanned]);
+        }
+      }
 
       if (pickingColor && crosshairPos) {
         const px = Math.max(0, Math.min(W - 1, crosshairPos.x));
@@ -119,6 +173,137 @@ export default function VisionPage() {
     },
   });
 
+  useEffect(() => {
+    isScanningRef.current = isScanning;
+    isRunningRef.current = isRunning;
+  }, [isScanning, isRunning]);
+
+  const useYolo = mode === "yolo";
+
+  const {
+    isReady: yoloReady,
+    detections: yoloDetections,
+    error: yoloError,
+    fps: yoloFps,
+    start: yoloStart,
+    stop: yoloStop,
+    getColor: yoloGetColor,
+  } = useObjectDetector({
+    enabled: useYolo && isRunning,
+    confidenceThreshold: 0.4,
+    classes: null,
+  });
+
+  const yoloStartRef = useRef(yoloStart);
+  const yoloStopRef = useRef(yoloStop);
+  useEffect(() => {
+    yoloStartRef.current = yoloStart;
+    yoloStopRef.current = yoloStop;
+  }, [yoloStart, yoloStop]);
+
+  useEffect(() => {
+    if (useYolo && isRunning && yoloReady) {
+      const videoEl = document.querySelector("video");
+      if (videoEl && videoEl.readyState >= 2) {
+        videoElRef.current = videoEl;
+        yoloStartRef.current(videoEl);
+      }
+    } else {
+      yoloStopRef.current();
+    }
+  }, [useYolo, isRunning, yoloReady]);
+
+  const visionContext: VisionContext = {
+    mode,
+    robotMode,
+    targetColor,
+    objects: objects.map(o => ({
+      id: o.id, label: o.label, color: o.color || "",
+      x: o.x, y: o.y, w: o.w, h: o.h,
+    })),
+    robot: { x: robot.x, y: robot.y, state: robot.state, battery: robot.battery },
+    fps,
+    savedObjects: savedObjects.map(o => ({ id: o.id, name: o.name })),
+    lockedObjectId,
+    isScanning,
+  };
+
+  const {
+    messages: aiMessages,
+    isThinking: aiThinking,
+    error: aiError,
+    isEnabled: aiEnabled,
+    setIsEnabled: setAiEnabled,
+    sendMessage: aiSendMessage,
+    clearChat: aiClearChat,
+    cancelRequest: aiCancelRequest,
+  } = useGroqAI({
+    apiKey: groqApiKey,
+    model: groqModel,
+    visionContext,
+    tools: {
+      onSetRobotMode: (m) => setRobotMode(m as RobotMode),
+      onSetDetectionMode: (m) => setMode(m as DetectionMode),
+      onSetTargetColor: (c, rgb) => {
+        setTargetColor(c);
+        if (rgb) {
+          const [h, s, v] = rgbToHsv(rgb.r, rgb.g, rgb.b);
+          customRangeRef.current = {
+            hMin: Math.max(0, h - 30), hMax: Math.min(360, h + 30),
+            sMin: Math.max(0, s - 40), sMax: Math.min(100, s + 40),
+            vMin: Math.max(0, v - 40), vMax: Math.min(100, v + 40),
+            avgH: h, avgS: s, avgV: v,
+          };
+          setColorLabel(c);
+        }
+      },
+      onSetColorTolerance: (v) => setColorTolerance(v),
+      onSetColorMinArea: (v) => setColorMinArea(v),
+      onSetMotionThreshold: (v) => setMotionThreshold(v),
+      onSetMotionMinArea: (v) => setMotionMinArea(v),
+      onSetEdgeThreshold: (v) => setEdgeThreshold(v),
+      onSetObjectMinArea: (v) => setObjectMinArea(v),
+      onSpeak: (text) => {
+        setInteractionLog(prev => [`AI: ${text}`, ...prev].slice(0, 10));
+      },
+      onStartScan: () => {
+        setIsScanning(true);
+        setScannedObjects([]);
+        setSelectedForLock(null);
+        setMode("scan");
+        nextScanIdRef.current = 1;
+      },
+      onStopScan: () => {
+        setIsScanning(false);
+        setSelectedForLock(null);
+      },
+      onLockObject: async (scanId: string, name: string) => {
+        const scanned = scannedObjects.find(o => o.id === scanId);
+        if (!scanned) return;
+        const savedObj: SavedObject = {
+          id: `obj-${Date.now()}`,
+          name,
+          signature: scanned.signature,
+          thumbnail: scanned.thumbnail,
+          createdAt: Date.now(),
+          seenCount: 0,
+        };
+        const updated = await addSavedObject(savedObj);
+        setSavedObjects(updated);
+        setScannedObjects(prev => prev.filter(o => o.id !== scanId));
+        setSelectedForLock(null);
+        setLockedObjectId(savedObj.id);
+      },
+      onTrackSavedObject: (name) => {
+        const obj = savedObjects.find(o => o.name.toLowerCase() === name.toLowerCase());
+        if (obj) {
+          setLockedObjectId(obj.id);
+          setInteractionLog(prev => [`AI tracking: ${name}`, ...prev].slice(0, 10));
+        }
+      },
+    },
+  });
+
   const handleCrosshairMove = useCallback((x: number, y: number) => {
     setCrosshairPos({ x, y });
   }, []);
@@ -127,17 +312,18 @@ export default function VisionPage() {
     if (!previewRgb || !crosshairPos) return;
     const frame = lastFrameRef.current;
     if (!frame) return;
-    const sensitivity = Math.round(((500 - colorThreshold) / 490) * 100);
-    const range = createCustomRangeFromArea(frame, crosshairPos.x, crosshairPos.y, 11, sensitivity);
-    setPickedRgb(previewRgb);
-    customRangeRef.current = range;
-    setColorLabel(null);
-    const name = closestNamedColor(previewRgb.r, previewRgb.g, previewRgb.b);
-    setTargetColor(name);
+    const range = createCustomRangeFromArea(frame, crosshairPos.x, crosshairPos.y, 15, colorTolerance);
+    if (range) {
+      setPickedRgb(previewRgb);
+      customRangeRef.current = range;
+      setColorLabel(null);
+      const name = closestNamedColor(previewRgb.r, previewRgb.g, previewRgb.b);
+      setTargetColor(name);
+    }
     setPickingColor(false);
     setCrosshairPos(null);
     setPreviewRgb(null);
-  }, [previewRgb, crosshairPos, colorThreshold]);
+  }, [previewRgb, crosshairPos, colorTolerance]);
 
   const handleColorCancel = useCallback(() => {
     setPickingColor(false);
@@ -187,234 +373,60 @@ export default function VisionPage() {
     setSavedColors(updated);
   }, []);
 
-  const handleDragSelect = useCallback((x: number, y: number, w: number, h: number) => {
-    setDragRegion({ x, y, w, h });
+  const handleStartScan = useCallback(() => {
+    setIsScanning(true);
+    setScannedObjects([]);
+    setSelectedForLock(null);
+    setMode("scan");
+    nextScanIdRef.current = 1;
   }, []);
 
-  const handleHybridStartTraining = useCallback(() => {
-    setHybridPhase("training");
-    setHybridSamples([]);
-    setHybridProfileName("");
-    setDragRegion(null);
+  const handleStopScan = useCallback(() => {
+    setIsScanning(false);
+    setSelectedForLock(null);
   }, []);
 
-  const handleHybridCaptureSample = useCallback(() => {
-    if (!dragRegion) return;
-    const frame = lastFrameRef.current;
-    if (!frame) return;
+  const handleScanObjectSelect = useCallback((id: string) => {
+    setSelectedForLock(prev => prev === id ? null : id);
+  }, []);
 
-    const { x: rx, y: ry, w: rw, h: rh } = dragRegion;
+  const handleLockObject = useCallback(async (scanId: string, name: string) => {
+    const scanned = scannedObjects.find(o => o.id === scanId);
+    if (!scanned) return;
 
-    const mask = new Uint8Array(W * H);
-    for (let dy = 0; dy < rh; dy++) {
-      for (let dx = 0; dx < rw; dx++) {
-        const px = rx + dx;
-        const py = ry + dy;
-        if (px < 0 || px >= W || py < 0 || py >= H) continue;
-        const idx = (py * W + px) * 4;
-        const r = frame.data[idx], g = frame.data[idx + 1], b = frame.data[idx + 2];
-        if (r > 240 && g > 240 && b > 240) continue;
-        if (r < 20 && g < 20 && b < 20) continue;
-        mask[py * W + px] = 255;
-      }
-    }
-
-    let hSum = 0, sSum = 0, vSum = 0, count = 0;
-    let hMin = 360, hMax = 0, sMin = 100, sMax = 0, vMin = 100, vMax = 0;
-
-    for (let dy = 0; dy < rh; dy++) {
-      for (let dx = 0; dx < rw; dx++) {
-        const px = rx + dx;
-        const py = ry + dy;
-        if (px < 0 || px >= W || py < 0 || py >= H) continue;
-        if (mask[py * W + px] === 0) continue;
-        const idx = (py * W + px) * 4;
-        const [h, s, v] = rgbToHsv(frame.data[idx], frame.data[idx + 1], frame.data[idx + 2]);
-        hSum += h; sSum += s; vSum += v; count++;
-        if (h < hMin) hMin = h; if (h > hMax) hMax = h;
-        if (s < sMin) sMin = s; if (s > sMax) sMax = s;
-        if (v < vMin) vMin = v; if (v > vMax) vMax = v;
-      }
-    }
-
-    if (count < 50) return;
-
-    const edgeDensity = computeEdgeDensity(frame, rx, ry, rw, rh);
-    const solidity = computeSolidity(mask, W, H, rx, ry, rw, rh);
-    const aspectRatio = rw / rh;
-    const cornerCount = approximateCornerCount(mask, W, H, rx, ry, rw, rh);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = rw;
-    canvas.height = rh;
-    const ctx = canvas.getContext("2d")!;
-    const imgData = ctx.createImageData(rw, rh);
-    for (let dy = 0; dy < rh; dy++) {
-      for (let dx = 0; dx < rw; dx++) {
-        const px = rx + dx;
-        const py = ry + dy;
-        const srcIdx = (py * W + px) * 4;
-        const dstIdx = (dy * rw + dx) * 4;
-        imgData.data[dstIdx] = frame.data[srcIdx];
-        imgData.data[dstIdx + 1] = frame.data[srcIdx + 1];
-        imgData.data[dstIdx + 2] = frame.data[srcIdx + 2];
-        imgData.data[dstIdx + 3] = 255;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-    const thumbnail = canvas.toDataURL("image/jpeg", 0.5);
-
-    const sample: HybridSample = {
-      id: `sample-${Date.now()}`,
-      hMin, hMax, sMin, sMax, vMin, vMax,
-      edgeDensity, aspectRatio, solidity, cornerCount,
-      capturedAt: Date.now(),
-    };
-
-    (window as any).__hybridThumbnail = thumbnail;
-    setHybridSamples(prev => [...prev, sample]);
-    setDragRegion(null);
-  }, [dragRegion]);
-
-  const buildProfileFromSamples = useCallback((samples: HybridSample[], toleranceMultiplier: number): HybridProfile => {
-    const allHMin = Math.min(...samples.map(s => s.hMin));
-    const allHMax = Math.max(...samples.map(s => s.hMax));
-    const allSMin = Math.min(...samples.map(s => s.sMin));
-    const allSMax = Math.max(...samples.map(s => s.sMax));
-    const allVMin = Math.min(...samples.map(s => s.vMin));
-    const allVMax = Math.max(...samples.map(s => s.vMax));
-
-    const avgEdgeDensity = samples.reduce((a, s) => a + s.edgeDensity, 0) / samples.length;
-    const avgAspectRatio = samples.reduce((a, s) => a + s.aspectRatio, 0) / samples.length;
-    const avgSolidity = samples.reduce((a, s) => a + s.solidity, 0) / samples.length;
-    const avgCornerCount = samples.reduce((a, s) => a + s.cornerCount, 0) / samples.length;
-
-    const edgeDensityStd = samples.reduce((a, s) => a + Math.abs(s.edgeDensity - avgEdgeDensity), 0) / samples.length;
-    const aspectRatioStd = samples.reduce((a, s) => a + Math.abs(s.aspectRatio - avgAspectRatio), 0) / samples.length;
-    const solidityStd = samples.reduce((a, s) => a + Math.abs(s.solidity - avgSolidity), 0) / samples.length;
-    const cornerCountStd = samples.reduce((a, s) => a + Math.abs(s.cornerCount - avgCornerCount), 0) / samples.length;
-
-    return {
-      id: `hybrid-temp`,
-      name: hybridProfileName.trim(),
-      hMin: Math.max(0, allHMin), hMax: Math.min(360, allHMax),
-      sMin: Math.max(0, allSMin), sMax: Math.min(100, allSMax),
-      vMin: Math.max(0, allVMin), vMax: Math.min(100, allVMax),
-      avgEdgeDensity, edgeDensityTolerance: Math.max(0.05, edgeDensityStd * 2 * toleranceMultiplier),
-      avgAspectRatio, aspectRatioTolerance: Math.max(0.3, aspectRatioStd * 2 * toleranceMultiplier),
-      avgSolidity, solidityTolerance: Math.max(0.05, solidityStd * 2 * toleranceMultiplier),
-      avgCornerCount, cornerCountTolerance: Math.max(2, cornerCountStd * 2 * toleranceMultiplier),
-      samples,
-      thumbnail: (window as any).__hybridThumbnail || "",
+    const savedObj: SavedObject = {
+      id: `obj-${Date.now()}`,
+      name,
+      signature: scanned.signature,
+      thumbnail: scanned.thumbnail,
       createdAt: Date.now(),
-    };
-  }, [hybridProfileName]);
-
-  const testDetectionInRegion = useCallback((profile: HybridProfile, region: { x: number; y: number; w: number; h: number }): boolean => {
-    const frame = lastFrameRef.current;
-    if (!frame) return false;
-
-    const mask = new Uint8Array(W * H);
-    for (let i = 0; i < frame.data.length; i += 4) {
-      const r = frame.data[i], g = frame.data[i + 1], b = frame.data[i + 2];
-      const [h, s, v] = rgbToHsv(r, g, b);
-      if (h >= profile.hMin && h <= profile.hMax && s >= profile.sMin && s <= profile.sMax && v >= profile.vMin && v <= profile.vMax) {
-        mask[i / 4] = 255;
-      }
-    }
-
-    const regions = findContours(mask, W, H, Math.max(200, colorThreshold));
-
-    for (const r of regions) {
-      const edgeDensity = computeEdgeDensity(frame, r.x, r.y, r.w, r.h);
-      const solidity = computeSolidity(mask, W, H, r.x, r.y, r.w, r.h);
-      const aspectRatio = r.w / r.h;
-      const cornerCount = approximateCornerCount(mask, W, H, r.x, r.y, r.w, r.h);
-
-      const edgeMatch = Math.abs(edgeDensity - profile.avgEdgeDensity) <= profile.edgeDensityTolerance;
-      const aspectMatch = Math.abs(aspectRatio - profile.avgAspectRatio) <= profile.aspectRatioTolerance;
-      const solidityMatch = Math.abs(solidity - profile.avgSolidity) <= profile.solidityTolerance;
-      const cornerMatch = Math.abs(cornerCount - profile.avgCornerCount) <= profile.cornerCountTolerance;
-
-      const score = [edgeMatch, aspectMatch, solidityMatch, cornerMatch].filter(Boolean).length;
-
-      if (score >= 3) {
-        const overlapX = Math.max(r.x, region.x);
-        const overlapY = Math.max(r.y, region.y);
-        const overlapW = Math.min(r.x + r.w, region.x + region.w) - overlapX;
-        const overlapH = Math.min(r.y + r.h, region.y + region.h) - overlapY;
-
-        if (overlapW > 0 && overlapH > 0) {
-          const overlapArea = overlapW * overlapH;
-          const regionArea = region.w * region.h;
-          if (overlapArea / regionArea > 0.3) return true;
-        }
-      }
-    }
-
-    return false;
-  }, [colorThreshold]);
-
-  const handleHybridTrain = useCallback(() => {
-    if (hybridSamples.length < 2 || !hybridProfileName.trim() || !dragRegion) return;
-
-    setHybridPhase("testing");
-    setImproveIteration(0);
-
-    const runTest = (iteration: number) => {
-      const toleranceMultiplier = 1 + iteration * 0.5;
-      const profile = buildProfileFromSamples(hybridSamples, toleranceMultiplier);
-
-      const detected = testDetectionInRegion(profile, dragRegion);
-
-      if (detected || iteration >= 15) {
-        const finalProfile: HybridProfile = {
-          ...profile,
-          id: `hybrid-${Date.now()}`,
-        };
-
-        addHybridProfile(finalProfile).then(updated => {
-          setHybridProfiles(updated);
-          setActiveHybridProfile(finalProfile);
-          hybridProfileRef.current = finalProfile;
-          setDetectedInRegion(detected);
-          setHybridPhase("done");
-        });
-      } else {
-        setImproveIteration(iteration + 1);
-        setHybridPhase("improving");
-        setTimeout(() => {
-          setHybridPhase("testing");
-          runTest(iteration + 1);
-        }, 100);
-      }
+      seenCount: 0,
     };
 
-    runTest(0);
-  }, [hybridSamples, hybridProfileName, dragRegion, buildProfileFromSamples, testDetectionInRegion]);
+    const updated = await addSavedObject(savedObj);
+    setSavedObjects(updated);
+    setScannedObjects(prev => prev.filter(o => o.id !== scanId));
+    setSelectedForLock(null);
+    setLockedObjectId(savedObj.id);
+  }, [scannedObjects]);
 
-  const handleHybridCancel = useCallback(() => {
-    setHybridPhase("idle");
-    setHybridSamples([]);
-    setHybridProfileName("");
-    setDragRegion(null);
-    setDetectedInRegion(false);
-    setImproveIteration(0);
+  const handleDeleteSavedObject = useCallback(async (id: string) => {
+    const updated = await removeSavedObject(id);
+    setSavedObjects(updated);
+    if (lockedObjectId === id) setLockedObjectId(null);
+  }, [lockedObjectId]);
+
+  const handleClearScanned = useCallback(() => {
+    setScannedObjects([]);
+    setSelectedForLock(null);
   }, []);
 
-  const handleSelectHybridProfile = useCallback((profile: HybridProfile) => {
-    setActiveHybridProfile(profile);
-    hybridProfileRef.current = profile;
-  }, []);
-
-  const handleDeleteHybridProfile = useCallback(async (id: string) => {
-    const updated = await removeHybridProfile(id);
-    setHybridProfiles(updated);
-    if (activeHybridProfile?.id === id) {
-      setActiveHybridProfile(null);
-      hybridProfileRef.current = null;
-    }
-  }, [activeHybridProfile]);
+  const resetRobot = () => {
+    setRobot({ x: W / 2, y: H / 2, angle: 0, speed: 0, targetX: W / 2, targetY: H / 2, state: "idle", battery: 100 });
+    setScore(0);
+    setInteractionLog([]);
+    setPlayTargets([]);
+  };
 
   const spawnPlayTarget = () => {
     const colors = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff8800"];
@@ -432,107 +444,238 @@ export default function VisionPage() {
     setScore(0);
   };
 
-  const resetRobot = () => {
-    setRobot({ x: W / 2, y: H / 2, angle: 0, speed: 0, targetX: W / 2, targetY: H / 2, state: "idle", battery: 100 });
-    setScore(0);
-    setInteractionLog([]);
-    setPlayTargets([]);
+  const handleApiKeySave = (key: string) => {
+    setGroqApiKey(key);
+    localStorage.setItem("groq_api_key", key);
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-3 sm:p-6">
-      <h1 className="text-2xl sm:text-3xl font-bold mb-4 sm:mb-6">Robot Vision Simulator</h1>
+    <div className="min-h-screen bg-[#0a0a0a] text-zinc-100">
+      {/* Top Bar */}
+      <header className="border-b border-zinc-800/50 bg-zinc-950/80 backdrop-blur-xl sticky top-0 z-50">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-base font-bold tracking-tight">Keinarra</h1>
+              <p className="text-[10px] text-zinc-500 -mt-0.5">Robot Vision Platform</p>
+            </div>
+          </div>
 
-      <div className="flex flex-col lg:flex-row gap-4 sm:gap-6">
-        <div className="flex-1">
-          <VideoFeed
-            videoRef={videoRef} canvasRef={canvasRef} overlayRef={overlayRef}
-            containerRef={containerRef}
-            isRunning={isRunning} mode={mode}
-            objects={objects}
-            pickingColor={pickingColor}
-            crosshairPos={crosshairPos}
-            pickedColor={previewRgb}
-            onCrosshairMove={handleCrosshairMove}
-            onColorConfirm={handleColorConfirm}
-            onColorCancel={handleColorCancel}
-            dragSelectEnabled={hybridPhase === "training"}
-            onDragSelect={handleDragSelect}
-            dragSelection={dragRegion}
-          />
-          <div className="flex gap-3 mt-4">
+          <div className="flex items-center gap-2">
             <button
-              onClick={startCamera}
-              disabled={isRunning}
-              className="px-4 py-2 bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={isRunning ? stopCamera : startCamera}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${
+                isRunning
+                  ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/30'
+                  : 'bg-green-600/20 text-green-400 hover:bg-green-600/30 border border-green-600/30'
+              }`}
             >
-              Start
+              <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-red-400 animate-pulse' : 'bg-green-400'}`} />
+              {isRunning ? 'Stop' : 'Start'}
             </button>
             <button
-              onClick={stopCamera}
-              disabled={!isRunning}
-              className="px-4 py-2 bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={resetRobot}
+              className="px-3 py-2 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-lg text-sm text-zinc-400 hover:text-zinc-200 transition-colors border border-zinc-700/50"
             >
-              Stop
-            </button>
-            <button onClick={resetRobot} className="px-4 py-2 bg-zinc-700 rounded-md hover:bg-zinc-600">
               Reset
             </button>
           </div>
         </div>
+      </header>
 
-        <div className="w-full lg:w-80 space-y-3 sm:space-y-4">
-          <StatsPanel fps={fps} objectsCount={objects.length} mode={mode} robot={robot} />
-          <ModeSelector robotMode={robotMode} detectionMode={mode} onRobotModeChange={setRobotMode} onDetectionModeChange={setMode} />
-
-          {robotMode === "play" && (
-            <PlayModePanel score={score} playTargets={playTargets} onSpawnTarget={spawnPlayTarget} onClearTargets={clearPlayTargets} />
-          )}
-
-          {(mode === "color" || mode === "all" || mode === "custom") && (
-            <ColorDetectionPanel
-              targetColor={targetColor} colorThreshold={colorThreshold}
-              pickingColor={pickingColor} pickedRgb={pickedRgb}
-              savedColors={savedColors}
-              onColorChange={setTargetColor} onThresholdChange={setColorThreshold}
-              onPickColor={() => { setPickingColor(true); setCrosshairPos({ x: W / 2, y: H / 2 }); }}
-              onClearPicked={clearPickedColor}
-              onSaveColor={handleSaveColor}
-              onSelectSaved={handleSelectSaved}
-              onDeleteSaved={handleDeleteSaved}
+      {/* Main Content */}
+      <main className="max-w-[1600px] mx-auto p-4 sm:p-6">
+        <div className="flex flex-col xl:flex-row gap-6">
+          {/* Left: Vision Feed */}
+          <div className="flex-1 min-w-0">
+            <VideoFeed
+              videoRef={videoRef} canvasRef={canvasRef} overlayRef={overlayRef}
+              containerRef={containerRef}
+              isRunning={isRunning} mode={mode}
+              objects={objects}
+              pickingColor={pickingColor}
+              crosshairPos={crosshairPos}
+              pickedColor={previewRgb}
+              onCrosshairMove={handleCrosshairMove}
+              onColorConfirm={handleColorConfirm}
+              onColorCancel={handleColorCancel}
+              isScanning={isScanning}
+              useYolo={useYolo}
+              scannedObjects={scannedObjects.map(o => ({ id: o.id, x: o.x, y: o.y, w: o.w, h: o.h }))}
+              selectedForLock={selectedForLock}
+              onScanObjectClick={handleScanObjectSelect}
+              yoloDetections={yoloDetections.map(d => ({
+                id: d.id,
+                label: d.label,
+                confidence: d.confidence,
+                x: d.x,
+                y: d.y,
+                w: d.w,
+                h: d.h,
+                color: getYoloColor(d.label),
+              }))}
+              yoloReady={yoloReady}
+              yoloFps={yoloFps}
+              yoloError={yoloError}
+              fps={fps}
+              aiEnabled={aiEnabled}
+              aiThinking={aiThinking}
             />
-          )}
 
-          {mode === "hybrid" && (
-            <HybridTrainingPanel
-              phase={hybridPhase}
-              samples={hybridSamples}
-              profileName={hybridProfileName}
-              activeProfile={activeHybridProfile}
-              profiles={hybridProfiles}
-              dragRegion={dragRegion}
-              detectedInRegion={detectedInRegion}
-              improveIteration={improveIteration}
-              onNameChange={setHybridProfileName}
-              onCaptureSample={handleHybridCaptureSample}
-              onRemoveSample={(id) => setHybridSamples(prev => prev.filter(s => s.id !== id))}
-              onTrain={handleHybridTrain}
-              onSelectProfile={handleSelectHybridProfile}
-              onDeleteProfile={handleDeleteHybridProfile}
-              onCancel={handleHybridCancel}
-              onStartTraining={handleHybridStartTraining}
-            />
-          )}
+            {/* Quick Stats Row */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-4">
+              <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">FPS</p>
+                <p className={`text-xl font-bold font-mono ${fps > 20 ? 'text-green-400' : fps > 10 ? 'text-yellow-400' : 'text-red-400'}`}>{fps}</p>
+              </div>
+              <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Objects</p>
+                <p className="text-xl font-bold font-mono text-cyan-400">{objects.length}</p>
+              </div>
+              {useYolo && (
+                <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">YOLO</p>
+                  <p className={`text-xl font-bold font-mono ${yoloReady ? 'text-green-400' : 'text-yellow-400'}`}>{yoloReady ? `${yoloFps}fps` : "..."}</p>
+                </div>
+              )}
+              <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Battery</p>
+                <p className={`text-xl font-bold font-mono ${robot.battery > 50 ? 'text-green-400' : robot.battery > 20 ? 'text-yellow-400' : 'text-red-400'}`}>{Math.round(robot.battery)}%</p>
+              </div>
+              <div className="bg-zinc-900/60 rounded-xl p-3 border border-zinc-800/50">
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">State</p>
+                <p className="text-xl font-bold font-mono text-zinc-300 capitalize">{robot.state}</p>
+              </div>
+            </div>
 
-          {(mode === "motion" || mode === "all") && (
-            <MotionDetectionPanel motionThreshold={motionThreshold} minMotionArea={minMotionArea} onThresholdChange={setMotionThreshold} onMinAreaChange={setMinMotionArea} />
-          )}
+            {/* AI Chat - Full width below video on desktop */}
+            <div className="mt-6">
+          <AIChatPanel
+            messages={aiMessages}
+            isThinking={aiThinking}
+            error={aiError}
+            isEnabled={aiEnabled}
+            model={groqModel}
+            onModelChange={(m) => { setGroqModel(m); localStorage.setItem("groq_model", m); }}
+            onToggle={() => setAiEnabled(prev => !prev)}
+            onSend={aiSendMessage}
+            onClear={aiClearChat}
+            onCancel={aiCancelRequest}
+          />
+            </div>
 
-          <InteractionLog logs={interactionLog} />
-          <DetectedObjectsList objects={objects} />
-          {showDebugLog && <DebugLogPanel logs={debugLog} />}
+            {/* API Key input */}
+            <div className="mt-4">
+              <div className="bg-zinc-900/40 rounded-xl p-3 border border-zinc-800/30">
+                <label className="text-[10px] text-zinc-600 uppercase tracking-wider font-medium block mb-1.5">Groq API Key</label>
+                <input
+                  type="text"
+                  inputMode="text"
+                  autoComplete="off"
+                  data-lpignore="true"
+                  data-form-type="other"
+                  value={groqApiKey}
+                  onChange={(e) => handleApiKeySave(e.target.value)}
+                  placeholder="gsk_... (free at console.groq.com)"
+                  className="w-full px-3 py-2 bg-zinc-800/40 rounded-lg border border-zinc-700/30 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-cyan-500/30 transition-colors"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Right: Sidebar */}
+          <div className="w-full xl:w-80 space-y-3">
+            <ModeSelector robotMode={robotMode} detectionMode={mode} onRobotModeChange={setRobotMode} onDetectionModeChange={setMode} />
+
+            {robotMode === "play" && (
+              <PlayModePanel score={score} playTargets={playTargets} onSpawnTarget={spawnPlayTarget} onClearTargets={clearPlayTargets} />
+            )}
+
+            {(mode === "color" || mode === "all") && (
+              <ColorDetectionPanel
+                targetColor={targetColor}
+                colorTolerance={colorTolerance}
+                colorMinArea={colorMinArea}
+                pickingColor={pickingColor}
+                pickedRgb={pickedRgb}
+                savedColors={savedColors}
+                onColorChange={setTargetColor}
+                onToleranceChange={setColorTolerance}
+                onMinAreaChange={setColorMinArea}
+                onPickColor={() => { setPickingColor(true); setCrosshairPos({ x: W / 2, y: H / 2 }); }}
+                onClearPicked={clearPickedColor}
+                onSaveColor={handleSaveColor}
+                onSelectSaved={handleSelectSaved}
+                onDeleteSaved={handleDeleteSaved}
+              />
+            )}
+
+            {(mode === "motion" || mode === "all") && (
+              <MotionDetectionPanel
+                motionThreshold={motionThreshold}
+                motionMinArea={motionMinArea}
+                onThresholdChange={setMotionThreshold}
+                onMinAreaChange={setMotionMinArea}
+              />
+            )}
+
+            {(mode === "object" || mode === "all") && (
+              <div className="bg-zinc-900/60 rounded-xl p-4 border border-zinc-800/50">
+                <h2 className="text-sm font-semibold mb-3 text-zinc-300">Object Detection</h2>
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Edge Threshold</label>
+                      <span className="text-xs font-mono text-zinc-400">{edgeThreshold}</span>
+                    </div>
+                    <input
+                      type="range" min="20" max="200" value={edgeThreshold}
+                      onChange={(e) => setEdgeThreshold(Number(e.target.value))}
+                      className="w-full accent-zinc-500"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Min Area</label>
+                      <span className="text-xs font-mono text-zinc-400">{objectMinArea}</span>
+                    </div>
+                    <input
+                      type="range" min="100" max="10000" step="100" value={objectMinArea}
+                      onChange={(e) => setObjectMinArea(Number(e.target.value))}
+                      className="w-full accent-zinc-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {(mode === "scan" || isScanning) && (
+              <ObjectScanPanel
+                isScanning={useYolo}
+                scannedObjects={scannedObjects}
+                savedObjects={savedObjects}
+                selectedForLock={selectedForLock}
+                onStartScan={handleStartScan}
+                onStopScan={handleStopScan}
+                onSelectObject={handleScanObjectSelect}
+                onLockObject={handleLockObject}
+                onDeleteSaved={handleDeleteSavedObject}
+                onClearScanned={handleClearScanned}
+              />
+            )}
+
+            <InteractionLog logs={interactionLog} />
+            <DetectedObjectsList objects={objects} />
+            <DebugLogPanel logs={debugLog} />
+          </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

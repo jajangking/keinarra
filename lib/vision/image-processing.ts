@@ -3,44 +3,57 @@ import type { RegionResult } from "./types";
 export function findContours(mask: Uint8Array, w: number, h: number, minArea: number): RegionResult[] {
   const visited = new Uint8Array(w * h);
   const regions: RegionResult[] = [];
+  const stack = new Int32Array(w * h);
 
   for (let y = 0; y < h; y++) {
+    const rowOff = y * w;
     for (let x = 0; x < w; x++) {
-      const idx = y * w + x;
+      const idx = rowOff + x;
       if (mask[idx] === 0 || visited[idx]) continue;
 
       let minX = x, minY = y, maxX = x, maxY = y;
       let area = 0;
       let perimeter = 0;
-      const stack = [idx];
+      let sp = 0;
+      stack[sp++] = idx;
       visited[idx] = 1;
 
-      while (stack.length > 0) {
-        const cur = stack.pop()!;
+      while (sp > 0) {
+        const cur = stack[--sp];
         const cx = cur % w;
-        const cy = Math.floor(cur / w);
+        const cy = (cur - cx) / w;
         area++;
         if (cx < minX) minX = cx;
         if (cx > maxX) maxX = cx;
         if (cy < minY) minY = cy;
         if (cy > maxY) maxY = cy;
 
-        const neighbors = [
-          cy > 0 ? cur - w : -1,
-          cy < h - 1 ? cur + w : -1,
-          cx > 0 ? cur - 1 : -1,
-          cx < w - 1 ? cur + 1 : -1,
-        ];
-
         let edgeCount = 0;
-        for (const n of neighbors) {
-          if (n < 0 || mask[n] === 0) {
-            edgeCount++;
-          } else if (!visited[n]) {
-            visited[n] = 1;
-            stack.push(n);
-          }
-        }
+
+        if (cy > 0) {
+          const n = cur - w;
+          if (mask[n] === 0) { edgeCount++; }
+          else if (!visited[n]) { visited[n] = 1; stack[sp++] = n; }
+        } else { edgeCount++; }
+
+        if (cy < h - 1) {
+          const n = cur + w;
+          if (mask[n] === 0) { edgeCount++; }
+          else if (!visited[n]) { visited[n] = 1; stack[sp++] = n; }
+        } else { edgeCount++; }
+
+        if (cx > 0) {
+          const n = cur - 1;
+          if (mask[n] === 0) { edgeCount++; }
+          else if (!visited[n]) { visited[n] = 1; stack[sp++] = n; }
+        } else { edgeCount++; }
+
+        if (cx < w - 1) {
+          const n = cur + 1;
+          if (mask[n] === 0) { edgeCount++; }
+          else if (!visited[n]) { visited[n] = 1; stack[sp++] = n; }
+        } else { edgeCount++; }
+
         perimeter += edgeCount;
       }
 
@@ -58,24 +71,21 @@ export function computeEdgeDensity(frame: ImageData, x: number, y: number, w: nu
   let totalPixels = 0;
 
   for (let dy = 1; dy < h - 1; dy++) {
+    const rowOff = (y + dy) * fw;
+    const nextRowOff = rowOff + fw;
     for (let dx = 1; dx < w - 1; dx++) {
       const px = x + dx;
       const py = y + dy;
       if (px < 0 || px >= fw || py < 0 || py >= frame.height) continue;
 
-      const idx = (py * fw + px) * 4;
-      const gray = 0.299 * frame.data[idx] + 0.587 * frame.data[idx + 1] + 0.114 * frame.data[idx + 2];
+      const idx = (rowOff + px) << 2;
+      const gray = (frame.data[idx] * 77 + frame.data[idx + 1] * 150 + frame.data[idx + 2] * 29) >> 8;
+      const idxR = idx + 4;
+      const grayR = (frame.data[idxR] * 77 + frame.data[idxR + 1] * 150 + frame.data[idxR + 2] * 29) >> 8;
+      const idxB = (nextRowOff + px) << 2;
+      const grayB = (frame.data[idxB] * 77 + frame.data[idxB + 1] * 150 + frame.data[idxB + 2] * 29) >> 8;
 
-      const idxR = (py * fw + px + 1) * 4;
-      const grayR = 0.299 * frame.data[idxR] + 0.587 * frame.data[idxR + 1] + 0.114 * frame.data[idxR + 2];
-
-      const idxB = ((py + 1) * fw + px) * 4;
-      const grayB = 0.299 * frame.data[idxB] + 0.587 * frame.data[idxB + 1] + 0.114 * frame.data[idxB + 2];
-
-      const gx = Math.abs(grayR - gray);
-      const gy = Math.abs(grayB - gray);
-
-      if (gx + gy > 60) edgeCount++;
+      if (Math.abs(grayR - gray) + Math.abs(grayB - gray) > 60) edgeCount++;
       totalPixels++;
     }
   }
@@ -85,14 +95,15 @@ export function computeEdgeDensity(frame: ImageData, x: number, y: number, w: nu
 
 export function computeSolidity(mask: Uint8Array, fw: number, fh: number, x: number, y: number, w: number, h: number): number {
   let area = 0;
-  let hullArea = w * h;
+  const hullArea = w * h;
 
   for (let dy = 0; dy < h; dy++) {
+    const rowOff = (y + dy) * fw;
     for (let dx = 0; dx < w; dx++) {
       const px = x + dx;
       const py = y + dy;
       if (px < 0 || px >= fw || py < 0 || py >= fh) continue;
-      if (mask[py * fw + px] > 0) area++;
+      if (mask[rowOff + px] > 0) area++;
     }
   }
 
@@ -104,23 +115,26 @@ export function approximateCornerCount(mask: Uint8Array, fw: number, fh: number,
   let corners = 0;
 
   for (let dy = step; dy < h - step; dy += step) {
+    const centerRowOff = (y + dy) * fw;
+    const topRowOff = (y + dy - step) * fw;
+    const bottomRowOff = (y + dy + step) * fw;
     for (let dx = step; dx < w - step; dx += step) {
       const px = x + dx;
       const py = y + dy;
       if (px < 0 || px >= fw || py < 0 || py >= fh) continue;
 
-      const center = mask[py * fw + px] > 0;
-      if (!center) continue;
+      if (mask[centerRowOff + px] === 0) continue;
 
-      const top = mask[(py - step) * fw + px] > 0;
-      const bottom = mask[(py + step) * fw + px] > 0;
-      const left = mask[py * fw + (px - step)] > 0;
-      const right = mask[py * fw + (px + step)] > 0;
+      const top = mask[topRowOff + px] > 0;
+      const bottom = mask[bottomRowOff + px] > 0;
+      const left = mask[centerRowOff + px - step] > 0;
+      const right = mask[centerRowOff + px + step] > 0;
 
-      const transitions = [top, right, bottom, left, top].reduce((acc, curr, i, arr) => {
-        if (i > 0 && curr !== arr[i - 1]) acc++;
-        return acc;
-      }, 0);
+      let transitions = 0;
+      if (top !== right) transitions++;
+      if (right !== bottom) transitions++;
+      if (bottom !== left) transitions++;
+      if (left !== top) transitions++;
 
       if (transitions >= 3) corners++;
     }

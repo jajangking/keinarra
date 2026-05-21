@@ -29,8 +29,8 @@ export function ModeSelector({ robotMode, detectionMode, onRobotModeChange, onDe
 
       <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
         <h2 className="text-lg font-semibold mb-3">Detection Mode</h2>
-        <div className="grid grid-cols-2 gap-2">
-          {(["all", "color", "motion", "object", "custom", "hybrid"] as DetectionMode[]).map((m) => (
+        <div className="grid grid-cols-3 gap-2">
+          {(["all", "color", "motion", "object", "scan", "yolo"] as DetectionMode[]).map((m) => (
             <button
               key={m}
               onClick={() => onDetectionModeChange(m)}
