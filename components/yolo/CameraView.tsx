@@ -1,5 +1,14 @@
 "use client";
 
+// Suppress TFLite internal noise from console
+if (typeof console !== "undefined") {
+  const tfliteMsg = (a: unknown) => typeof a === "string" && (a.includes("TensorFlow") || a.includes("XNNPACK"));
+  const origInfo = console.info.bind(console);
+  console.info = (...args) => { if (args.some(tfliteMsg)) return; origInfo(...args); };
+  const origLog = console.log.bind(console);
+  console.log = (...args) => { if (args.some(tfliteMsg)) return; origLog(...args); };
+}
+
 import { useRef, useState, useCallback, useEffect } from "react";
 
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite";
