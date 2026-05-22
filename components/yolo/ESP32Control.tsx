@@ -66,17 +66,6 @@ export function ESP32Control({
     wsSend(`<< MOTOR:${l},${r}`);
   }, [wsSend]);
 
-  const sendBuzzer = useCallback((pattern: string) => {
-    if (pattern === "off") {
-      wsSend("<< BUZZER:OFF");
-      onBuzzer?.("off");
-      return;
-    }
-    const freq = pattern === "found" ? 1000 : pattern === "lost" ? 600 : 800;
-    wsSend(`<< BUZZER:ON:FREQ=${freq}`);
-    onBuzzer?.(pattern);
-  }, [wsSend, onBuzzer]);
-
   const connect = useCallback(() => {
     if (!ip.trim()) { addLog(">> Masukkan IP ESP32"); return; }
     const url = `ws://${ip.trim()}:81/`;
@@ -154,8 +143,53 @@ export function ESP32Control({
   const r = externalRight ?? 0;
   const buz = externalBuzzer ?? false;
 
+  // Buzzer local state for manual toggle (independent of externalBuzzer prop)
+  const buzzerActiveRef = useRef(false);
+
+  const toggleBuzzer = useCallback(() => {
+    if (buzzerActiveRef.current) {
+      wsSend("<< BUZZER:OFF");
+      buzzerActiveRef.current = false;
+      onBuzzer?.("off");
+    } else {
+      wsSend("<< BUZZER:ON:FREQ=800");
+      buzzerActiveRef.current = true;
+      onBuzzer?.("chirp");
+    }
+  }, [wsSend, onBuzzer]);
+
+  // Forward external buzzer changes to WebSocket
+  useEffect(() => {
+    if (!connected) return;
+    if (buz) {
+      wsSend("<< BUZZER:ON:FREQ=800");
+      buzzerActiveRef.current = true;
+    } else {
+      wsSend("<< BUZZER:OFF");
+      buzzerActiveRef.current = false;
+    }
+  }, [buz, connected, wsSend]);
+
+  // Background: stop motors when page hidden
+  useEffect(() => {
+    const onHide = () => {
+      sendMotors(0, 0);
+      onMotors?.(0, 0);
+    };
+    const onVis = () => {
+      if (document.hidden) onHide();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("blur", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("blur", onHide);
+    };
+  }, [sendMotors, onMotors]);
+
+  const currentSpeedRef = useRef({ l: 0, r: 0 });
   const keyTargetRef = useRef({ l: 0, r: 0 });
-  // Keyboard
+  // Keyboard with smooth acceleration ramp
   useEffect(() => {
     const keys = new Set<string>();
     let anim = 0;
@@ -168,6 +202,7 @@ export function ESP32Control({
         if (active) {
           active = false;
           keyTargetRef.current = { l: 0, r: 0 };
+          currentSpeedRef.current = { l: 0, r: 0 };
           sendMotors(0, 0);
           onMotors?.(0, 0);
         }
@@ -177,19 +212,25 @@ export function ESP32Control({
 
       active = true;
 
-      if (keys.has("ArrowUp") && keys.has("ArrowLeft")) { keyTargetRef.current = { l: 100, r: 200 }; }
-      else if (keys.has("ArrowUp") && keys.has("ArrowRight")) { keyTargetRef.current = { l: 200, r: 100 }; }
-      else if (keys.has("ArrowDown") && keys.has("ArrowLeft")) { keyTargetRef.current = { l: -100, r: -200 }; }
-      else if (keys.has("ArrowDown") && keys.has("ArrowRight")) { keyTargetRef.current = { l: -200, r: -100 }; }
+      if (keys.has("ArrowUp") && keys.has("ArrowLeft")) { keyTargetRef.current = { l: 200, r: 255 }; }
+      else if (keys.has("ArrowUp") && keys.has("ArrowRight")) { keyTargetRef.current = { l: 255, r: 200 }; }
+      else if (keys.has("ArrowDown") && keys.has("ArrowLeft")) { keyTargetRef.current = { l: -200, r: -255 }; }
+      else if (keys.has("ArrowDown") && keys.has("ArrowRight")) { keyTargetRef.current = { l: -255, r: -200 }; }
       else if (keys.has("ArrowUp")) { keyTargetRef.current = { l: 255, r: 255 }; }
       else if (keys.has("ArrowDown")) { keyTargetRef.current = { l: -255, r: -255 }; }
-      else if (keys.has("ArrowLeft")) { keyTargetRef.current = { l: -200, r: 200 }; }
-      else if (keys.has("ArrowRight")) { keyTargetRef.current = { l: 200, r: -200 }; }
-      else if (keys.has(" ")) { keys.delete(" "); sendBuzzer(buz ? "off" : "chirp"); }
+      else if (keys.has("ArrowLeft")) { keyTargetRef.current = { l: -255, r: 255 }; }
+      else if (keys.has("ArrowRight")) { keyTargetRef.current = { l: 255, r: -255 }; }
+      else if (keys.has(" ")) { keys.delete(" "); toggleBuzzer(); }
 
       const t = keyTargetRef.current;
-      sendMotors(t.l, t.r);
-      onMotors?.(t.l, t.r);
+      const c = currentSpeedRef.current;
+
+      const step = 24;
+      if (c.l !== t.l) { c.l += Math.sign(t.l - c.l) * Math.min(step, Math.abs(t.l - c.l)); }
+      if (c.r !== t.r) { c.r += Math.sign(t.r - c.r) * Math.min(step, Math.abs(t.r - c.r)); }
+
+      sendMotors(c.l, c.r);
+      onMotors?.(c.l, c.r);
 
       anim = requestAnimationFrame(loop);
     };
@@ -213,7 +254,7 @@ export function ESP32Control({
       keys.clear();
       lastSentMotorsRef.current = { l: -999, r: -999 };
     };
-  }, [connected, buz, sendMotors, sendBuzzer, onMotors, onBuzzer]);
+  }, [connected, sendMotors, toggleBuzzer, onMotors]);
 
   const disconnect = useCallback(() => {
     clearTimeout(reconnectTimerRef.current);
@@ -277,7 +318,7 @@ export function ESP32Control({
       {/* Buttons */}
       <div className="grid grid-cols-3 gap-1 px-3 pb-2">
         <button disabled={!connected} onTouchStart={() => sendMotors(255, 255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
-        <button disabled={!connected} onClick={() => sendBuzzer(buz ? "off" : "chirp")} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
+        <button disabled={!connected} onClick={toggleBuzzer} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buzzerActiveRef.current ? "🔊" : "🔇"}</button>
         <button disabled={!connected} onTouchStart={() => sendMotors(-255, -255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
         <button disabled={!connected} onTouchStart={() => sendMotors(-200, 200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
         <button disabled={!connected} onClick={() => sendMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>

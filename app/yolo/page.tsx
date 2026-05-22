@@ -231,7 +231,7 @@ export default function YoloPage() {
               searchState={searchState}
               detections={dets}
               onMotors={handleMotors}
-              onBuzzer={(p) => {}}
+              onBuzzer={(p) => setBuzzerOn(p !== "off")}
             />
           </div>
         )}
