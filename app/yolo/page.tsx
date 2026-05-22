@@ -6,7 +6,20 @@ import { AIChat } from "@/components/yolo/AIChat";
 import { ESP32Control } from "@/components/yolo/ESP32Control";
 import { useRobotSearch } from "@/hooks/useRobotSearch";
 import { useBuzzerSound } from "@/hooks/useBuzzerSound";
+import { useSearchVoice } from "@/hooks/useSearchVoice";
+import { useSpeechToText } from "@/hooks/useSpeechToText";
+import { useInteraction } from "@/hooks/useInteraction";
+import { useAudioManager } from "@/hooks/useAudioManager";
 import type { Detection } from "@/components/yolo/CameraView";
+import type { Mood } from "@/hooks/useMood";
+
+const MOOD_BUZZER: Partial<Record<Mood, string>> = {
+  excited: "excited",
+  happy: "found",
+  playful: "chirp",
+  confused: "lost",
+  tired: "tired",
+};
 
 export default function YoloPage() {
   const [dets, setDets] = useState<Detection[]>([]);
@@ -16,8 +29,22 @@ export default function YoloPage() {
   const [motorL, setMotorL] = useState(0);
   const [motorR, setMotorR] = useState(0);
   const [buzzerOn, setBuzzerOn] = useState(false);
-  const { buzzerStart, buzzerStop } = useBuzzerSound();
+  const [sttEnabled, setSttEnabled] = useState(true);
+  const [voiceLog, setVoiceLog] = useState<{ role: "assistant"; text: string }[]>([]);
+
+  const audio = useAudioManager();
+  const { buzzerStart, buzzerStop, setCanPlay } = useBuzzerSound();
+  const voice = useSearchVoice();
+  const { sttStart, sttStop } = useSpeechToText();
+  const interaction = useInteraction();
   const panelRef = useRef<HTMLDivElement>(null);
+  const prevSearchStateRef = useRef<"idle" | "searching" | "locked" | "resting">("idle");
+  const searchVoiceSpokeRef = useRef(false);
+
+  // Buzzer respects TTS
+  useEffect(() => {
+    setCanPlay(() => audio.canBuzzer());
+  }, [setCanPlay, audio.canBuzzer]);
 
   const handleDetections = useCallback((d: Detection[]) => {
     setDets(d);
@@ -28,26 +55,116 @@ export default function YoloPage() {
     setMotorR(r);
   }, []);
 
-  const handleBuzzer = useCallback((freq: number) => {
-    setBuzzerOn(freq > 0);
-    if (freq > 0) buzzerStart(freq);
-    else buzzerStop();
-  }, [buzzerStart, buzzerStop]);
+  const handleBuzzer = useCallback((mood: Mood) => {
+    const pattern = MOOD_BUZZER[mood];
+    if (!pattern) return;
+    setBuzzerOn(true);
+    buzzerStart(pattern as "found" | "search" | "lost" | "excited" | "chirp" | "tired");
+    setTimeout(() => setBuzzerOn(false), 1200);
+  }, [buzzerStart]);
 
-  const { state: searchState, target } = useRobotSearch({
+  const { state: searchState } = useRobotSearch({
     detections: dets,
     onMotors: handleMotors,
-    onBuzzer: handleBuzzer,
     enabled: searchMode,
   });
+
+  // Voice trigger on search state change
+  useEffect(() => {
+    voice.trigger({
+      searchState,
+      onSpeak: (text: string) => {
+        searchVoiceSpokeRef.current = true;
+        setVoiceLog(prev => [...prev.slice(-20), { role: "assistant", text }]);
+      },
+    });
+  }, [searchState, voice]);
+
+  // Start interaction once when search mode turns on
+  useEffect(() => {
+    if (searchMode) {
+      interaction.start({
+        onMotors: handleMotors,
+        onBuzzer: handleBuzzer,
+        onStartSTT: sttEnabled ? sttStart : undefined,
+        audioManager: sttEnabled ? audio : undefined,
+      });
+    } else {
+      interaction.stop();
+      setVoiceLog([]);
+    }
+    return () => {
+      if (!searchMode) interaction.stop();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchMode]);
+
+  // Control mic based on search state + wait for search voice TTS on lock
+  useEffect(() => {
+    const prev = prevSearchStateRef.current;
+    prevSearchStateRef.current = searchState;
+
+    if (!searchMode || !sttEnabled) return;
+
+    if (searchState === "locked") {
+      if (prev !== "locked") {
+        searchVoiceSpokeRef.current = false;
+        let elapsed = 0;
+        const waitSearchVoice = () => {
+          elapsed += 200;
+          if ((searchVoiceSpokeRef.current && !window.speechSynthesis.speaking) || elapsed > 8000) {
+            searchVoiceSpokeRef.current = false;
+            interaction.listen();
+          } else {
+            setTimeout(waitSearchVoice, 200);
+          }
+        };
+        setTimeout(waitSearchVoice, 500);
+      }
+    } else {
+      interaction.stopListening();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchState, searchMode, sttEnabled]);
+
+  // STT toggle
+  const handleSttToggle = useCallback(() => {
+    setSttEnabled(prev => {
+      const next = !prev;
+      if (searchMode) {
+        if (next && searchState === "locked") {
+          interaction.listen();
+        } else {
+          interaction.stopListening();
+        }
+      }
+      return next;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchMode, searchState]);
+
+  const handleSendText = useCallback((text: string) => {
+    if (!interaction.running.current) {
+      interaction.start({
+        onMotors: handleMotors,
+        onBuzzer: handleBuzzer,
+        onStartSTT: sttEnabled ? sttStart : undefined,
+        audioManager: sttEnabled ? audio : undefined,
+      });
+    }
+    interaction.sendText(text);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sttEnabled]);
 
   const persons = dets.filter(d => d.label === "person");
 
   const stateColor = searchState === "searching" ? "text-yellow-400" 
     : searchState === "locked" ? "text-green-400" 
+    : searchState === "resting" ? "text-red-400" 
     : "text-zinc-600";
   const stateLabel = searchState === "searching" ? "MENCARI"
     : searchState === "locked" ? "MENGIKUTI"
+    : searchState === "resting" ? "ISTIRAHAT"
     : "DIAM";
 
   return (
@@ -65,6 +182,13 @@ export default function YoloPage() {
           <span className={`text-[9px] font-mono font-semibold ${stateColor}`}>
             {stateLabel}
           </span>
+          <span className="text-[9px] font-mono text-purple-400">{interaction.mood.mood}</span>
+          {interaction.listening && (
+            <span className="text-[9px] font-mono text-cyan-400 animate-pulse">🎤</span>
+          )}
+          {audio.ttsSpeaking && (
+            <span className="text-[9px] font-mono text-yellow-400">💬</span>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
           <button
@@ -95,7 +219,7 @@ export default function YoloPage() {
               searchState={searchState}
               detections={dets}
               onMotors={handleMotors}
-              onBuzzer={handleBuzzer}
+              onBuzzer={(p) => {}}
             />
           </div>
         )}
@@ -106,17 +230,23 @@ export default function YoloPage() {
         <div className="flex-1 relative min-h-0">
           <CameraView onDetections={handleDetections} onFps={setYoloFps} />
 
-          {/* Search status overlay */}
           {searchMode && (
             <div className="absolute top-2 left-2 flex items-center gap-1.5" style={{ zIndex: 7 }}>
-              <span className={`w-2 h-2 rounded-full ${searchState === "searching" ? "bg-yellow-400 animate-ping" : searchState === "locked" ? "bg-green-400" : "bg-zinc-600"}`} />
+              <span className={`w-2 h-2 rounded-full ${searchState === "searching" ? "bg-yellow-400 animate-ping" : searchState === "locked" ? "bg-green-400" : searchState === "resting" ? "bg-red-400" : "bg-zinc-600"}`} />
               <span className={`text-[9px] font-mono font-bold ${stateColor}`}>
-                {searchState === "searching" ? "MENCARI..." : searchState === "locked" ? `❗ORANG DITEMUKAN` : ""}
+                {searchState === "searching" ? "MENCARI..." : searchState === "locked" ? "NGOMONG" : searchState === "resting" ? "💤 CAPEK" : ""}
               </span>
             </div>
           )}
         </div>
-        <AIChat detections={dets} fps={yoloFps} />
+        <AIChat
+          messages={[...voiceLog, ...interaction.messages]}
+          isThinking={interaction.thinking}
+          sttEnabled={sttEnabled}
+          onSttToggle={handleSttToggle}
+          onSendText={handleSendText}
+          ttsSpeaking={audio.ttsSpeaking}
+        />
       </div>
     </div>
   );

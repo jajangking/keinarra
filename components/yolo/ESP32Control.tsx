@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Robot3D } from "@/components/yolo/Robot3D";
 
 interface Detection {
@@ -16,10 +16,10 @@ interface ESP32ControlProps {
   leftSpeed?: number;
   rightSpeed?: number;
   buzzerOn?: boolean;
-  searchState?: "idle" | "searching" | "locked";
+  searchState?: "idle" | "searching" | "locked" | "resting";
   detections?: Detection[];
   onMotors?: (left: number, right: number) => void;
-  onBuzzer?: (freq: number) => void;
+  onBuzzer?: (pattern: string) => void;
   onConnect?: () => void;
   onDisconnect?: () => void;
 }
@@ -28,39 +28,43 @@ export function ESP32Control({
   leftSpeed: externalLeft,
   rightSpeed: externalRight,
   buzzerOn: externalBuzzer,
-  searchState = "idle",
+  searchState = "idle" as "idle" | "searching" | "locked" | "resting",
   detections = [],
   onMotors, onBuzzer, onConnect, onDisconnect 
 }: ESP32ControlProps) {
   const [connected, setConnected] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  const [ip, setIp] = useState("");
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectRef = useRef(0);
 
   const addLog = useCallback((msg: string) => {
-    setLog(prev => [msg, ...prev].slice(0, 30));
+    setLog(prev => [msg, ...prev].slice(0, 50));
   }, []);
 
+  const wsSend = useCallback((cmd: string) => {
+    addLog(cmd);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(cmd);
+    }
+  }, [addLog]);
+
   const setMotors = useCallback((l: number, r: number) => {
-    addLog(`<< MOTOR:${l},${r}`);
+    wsSend(`<< MOTOR:${l},${r}`);
     onMotors?.(l, r);
-  }, [addLog, onMotors]);
+  }, [wsSend, onMotors]);
 
-  const handleBuzzer = useCallback((freq: number) => {
-    addLog(freq > 0 ? `<< BUZZER:${freq}Hz` : "<< BUZZER:OFF");
-    onBuzzer?.(freq);
-  }, [addLog, onBuzzer]);
-
-  const handleConnect = useCallback(() => {
-    setConnected(true);
-    addLog(">> ESP32 CONNECTED");
-    onConnect?.();
-  }, [addLog, onConnect]);
-
-  const handleDisconnect = useCallback(() => {
-    setConnected(false);
-    setMotors(0, 0);
-    addLog(">> ESP32 DISCONNECTED");
-    onDisconnect?.();
-  }, [addLog, onDisconnect, setMotors]);
+  const handleBuzzer = useCallback((pattern: string) => {
+    if (pattern === "off") {
+      wsSend("<< BUZZER:OFF");
+      onBuzzer?.("off");
+      return;
+    }
+    const freq = pattern === "found" ? 1000 : pattern === "lost" ? 600 : 800;
+    wsSend(`<< BUZZER:ON:FREQ=${freq}`);
+    onBuzzer?.(pattern);
+  }, [wsSend, onBuzzer]);
 
   const l = externalLeft ?? 0;
   const r = externalRight ?? 0;
@@ -79,7 +83,7 @@ export function ESP32Control({
       else if (keys.has("ArrowDown")) setMotors(-255, -255);
       else if (keys.has("ArrowLeft")) setMotors(-200, 200);
       else if (keys.has("ArrowRight")) setMotors(200, -200);
-      else if (keys.has(" ")) handleBuzzer(buz ? 0 : 1000);
+      else if (keys.has(" ")) handleBuzzer(buz ? "off" : "chirp");
       if (keys.size === 0) setMotors(0, 0);
     }, 100);
 
@@ -90,43 +94,44 @@ export function ESP32Control({
     return () => { clearInterval(interval); window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, [connected, buz, handleBuzzer, setMotors]);
 
-  // Touch joystick
-  const stickRef = useRef<HTMLDivElement>(null);
-  const stickActive = useRef(false);
-  const stickCenter = useRef({ x: 0, y: 0 });
+  const connect = useCallback(() => {
+    if (!ip.trim()) { addLog(">> Masukkan IP ESP32"); return; }
+    const url = `ws://${ip.trim()}:81/`;
+    addLog(`>> MENYAMBUNG ${url}`);
+    const ws = new WebSocket(url);
 
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (!connected) return;
-    const el = stickRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    stickCenter.current = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    stickActive.current = true;
-  };
+    ws.onopen = () => {
+      wsRef.current = ws;
+      setConnected(true);
+      addLog(">> ESP32 TERHUBUNG");
+      onConnect?.();
+    };
 
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!stickActive.current || !connected) return;
-    const t = e.touches[0];
-    const dx = t.clientX - stickCenter.current.x;
-    const dy = t.clientY - stickCenter.current.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    const clamp = Math.min(dist / 50, 1);
-    const angle = Math.atan2(dy, dx);
+    ws.onmessage = (e) => {
+      addLog(">> " + e.data);
+    };
 
-    let left = 0, right = 0;
-    const power = Math.round(clamp * 255);
-    if (dist < 10) { left = 0; right = 0; }
-    else if (angle > -Math.PI*0.75 && angle < -Math.PI*0.25) { left = power; right = power; }
-    else if (angle > Math.PI*0.25 && angle < Math.PI*0.75) { left = -power; right = -power; }
-    else if (angle > Math.PI*0.75 || angle < -Math.PI*0.75) { left = -power; right = power; }
-    else { left = power; right = -power; }
-    setMotors(left, right);
-  }, [setMotors, connected]);
+    ws.onerror = () => {
+      addLog(">> GAGAL TERHUBUNG");
+    };
 
-  const handleTouchEnd = () => {
-    stickActive.current = false;
-    setMotors(0, 0);
-  };
+    ws.onclose = () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+        setConnected(false);
+        addLog(">> ESP32 TERPUTUS");
+        onDisconnect?.();
+      }
+    };
+  }, [ip, addLog, onConnect, onDisconnect]);
+
+  const disconnect = useCallback(() => {
+    wsRef.current?.close();
+    wsRef.current = null;
+    setConnected(false);
+    addLog(">> ESP32 DIPUTUSKAN");
+    onDisconnect?.();
+  }, [addLog, onDisconnect]);
 
   return (
     <div className="bg-zinc-900/90 backdrop-blur-md rounded-xl border border-zinc-800/50 overflow-hidden shadow-xl" style={{ width: 240 }}>
@@ -138,10 +143,28 @@ export function ESP32Control({
           <span className={`text-[8px] font-mono ${connected ? "text-green-400" : "text-red-400"}`}>
             {connected ? "ONLINE" : "OFFLINE"}
           </span>
-          <button onClick={connected ? handleDisconnect : handleConnect} className="ml-1 px-1.5 py-0.5 rounded text-[7px] bg-zinc-800 hover:bg-zinc-700 text-zinc-500 transition-colors">
-            {connected ? "OFF" : "ON"}
-          </button>
         </div>
+      </div>
+
+      {/* IP input + connect */}
+      <div className="flex items-center gap-1 px-3 py-1.5 border-b border-zinc-800/30">
+        <input
+          value={ip}
+          onChange={e => setIp(e.target.value)}
+          placeholder="192.168.x.x"
+          disabled={connected}
+          className="flex-1 bg-zinc-800/60 border border-zinc-700/50 rounded px-1.5 py-1 text-[8px] font-mono text-zinc-300 placeholder-zinc-700 outline-none focus:border-cyan-700/50 transition-colors"
+        />
+        <button
+          onClick={connected ? disconnect : connect}
+          className={`px-2 py-1 rounded text-[7px] font-medium transition-colors ${
+            connected
+              ? "bg-red-600/30 text-red-400 hover:bg-red-600/40"
+              : "bg-cyan-600/30 text-cyan-400 hover:bg-cyan-600/40"
+          }`}
+        >
+          {connected ? "OFF" : "ON"}
+        </button>
       </div>
 
       {/* 3D Robot Visualization */}
@@ -156,21 +179,10 @@ export function ESP32Control({
         />
       </div>
 
-      {/* Joystick */}
-      <div className="flex items-center justify-center py-2">
-        <div ref={stickRef} className="relative w-20 h-20 rounded-full bg-zinc-800/80 border border-zinc-700/50 cursor-pointer select-none touch-none" onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
-          <span className="absolute top-1 left-1/2 -translate-x-1/2 text-[7px] text-zinc-600 font-mono">F</span>
-          <span className="absolute bottom-1 left-1/2 -translate-x-1/2 text-[7px] text-zinc-600 font-mono">B</span>
-          <span className="absolute left-1 top-1/2 -translate-y-1/2 text-[7px] text-zinc-600 font-mono">L</span>
-          <span className="absolute right-1 top-1/2 -translate-y-1/2 text-[7px] text-zinc-600 font-mono">R</span>
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-cyan-500/60 border border-cyan-400/40" />
-        </div>
-      </div>
-
       {/* Buttons */}
       <div className="grid grid-cols-3 gap-1 px-3 pb-2">
         <button disabled={!connected} onTouchStart={() => setMotors(255, 255)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
-        <button disabled={!connected} onClick={() => handleBuzzer(buz ? 0 : 1000)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
+        <button disabled={!connected} onClick={() => handleBuzzer(buz ? "off" : "chirp")} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
         <button disabled={!connected} onTouchStart={() => setMotors(-255, -255)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
         <button disabled={!connected} onTouchStart={() => setMotors(-200, 200)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
         <button disabled={!connected} onClick={() => setMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>
@@ -211,10 +223,14 @@ export function ESP32Control({
         )}
       </div>
 
-      {/* Serial */}
+      {/* Monitor */}
       <div className="border-t border-zinc-800/40">
-        <div className="h-16 overflow-y-auto px-2 py-1 font-mono text-[7px] leading-relaxed">
-          {log.length === 0 && <span className="text-zinc-700">No commands</span>}
+        <div className="flex items-center justify-between px-2 py-0.5">
+          <span className="text-[6px] font-mono text-zinc-700">WS</span>
+          <button onClick={() => setLog([])} className="text-[6px] px-1 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-600 transition-colors">CLR</button>
+        </div>
+        <div className="h-20 overflow-y-auto px-2 py-1 font-mono text-[7px] leading-relaxed">
+          {log.length === 0 && <span className="text-zinc-700">—</span>}
           {log.map((line, i) => (
             <div key={i} className={line.startsWith("<<") ? "text-cyan-600" : line.startsWith(">>") ? "text-green-600" : "text-zinc-600"}>{line}</div>
           ))}

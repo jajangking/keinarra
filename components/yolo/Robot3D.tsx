@@ -16,7 +16,7 @@ interface Robot3DProps {
   rightSpeed: number;
   buzzerOn: boolean;
   connected: boolean;
-  searchState?: "idle" | "searching" | "locked";
+  searchState?: "idle" | "searching" | "locked" | "resting";
   detections?: Detection[];
 }
 
@@ -297,6 +297,9 @@ export function Robot3D({ leftSpeed, rightSpeed, buzzerOn, connected, searchStat
       } else if (searchState === "locked") {
         ctx.fillStyle = "rgba(34,197,94,0.35)";
         ctx.fillText("MENGIKUTI", cx, 10);
+      } else if (searchState === "resting") {
+        ctx.fillStyle = "rgba(239,68,68,0.35)";
+        ctx.fillText("ISTIRAHAT", cx, 10);
       }
 
       // Person count + closest
