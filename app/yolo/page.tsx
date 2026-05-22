@@ -222,19 +222,17 @@ export default function YoloPage() {
           </button>
         </div>
 
-        {showESP && (
-          <div ref={panelRef} className="absolute top-full right-2 mt-1" style={{ zIndex: 20 }}>
-            <ESP32Control
-              leftSpeed={motorL}
-              rightSpeed={motorR}
-              buzzerOn={buzzerOn}
-              searchState={searchState}
-              detections={dets}
-              onMotors={handleMotors}
-              onBuzzer={(p) => setBuzzerOn(p !== "off")}
-            />
-          </div>
-        )}
+        <div ref={panelRef} className={`absolute top-full right-2 mt-1 transition-opacity duration-150 ${showESP ? "opacity-100" : "opacity-0 pointer-events-none"}`} style={{ zIndex: 20 }}>
+          <ESP32Control
+            leftSpeed={motorL}
+            rightSpeed={motorR}
+            buzzerOn={buzzerOn}
+            searchState={searchState}
+            detections={dets}
+            onMotors={handleMotors}
+            onBuzzer={(p) => setBuzzerOn(p !== "off")}
+          />
+        </div>
       </div>
 
       {/* Camera area */}
