@@ -4,12 +4,12 @@ const path = require("path");
 const WASM_SRC = path.join(__dirname, "..", "node_modules", "@mediapipe", "tasks-vision", "wasm");
 const WASM_DEST = path.join(__dirname, "..", "public", "wasm");
 
+fs.mkdirSync(WASM_DEST, { recursive: true });
+
 if (!fs.existsSync(WASM_SRC)) {
   console.error("[copy-wasm] Source not found:", WASM_SRC);
   process.exit(0);
 }
-
-fs.mkdirSync(WASM_DEST, { recursive: true });
 
 const files = fs.readdirSync(WASM_SRC);
 let copied = 0;
