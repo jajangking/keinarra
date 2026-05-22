@@ -36,6 +36,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# downloaded models (built during vercel deployment)
+/public/models/
+/public/wasm/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "download-model": "node scripts/download-yolo-model.js",
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/download-yolo-model.js && node scripts/copy-wasm.js && next build",
     "start": "next start",
     "lint": "eslint"
   },

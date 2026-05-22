@@ -103,6 +103,10 @@ export function useObjectDetector({
   const lastDetectTimeRef = useRef(0);
   const nextIdRef = useRef(1);
   const detectFnRef = useRef<((video: HTMLVideoElement) => void) | null>(null);
+  const MODEL_PATH = typeof window !== "undefined" && window.location.origin
+    ? "/models/efficientdet_lite0.tflite"
+    : "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite";
+
   const detectIntervalMs = 100;
 
   useEffect(() => {
@@ -116,10 +120,22 @@ export function useObjectDetector({
         if (!cancelled) {
           setError("YOLO model loading timed out. Check your internet connection or try again.");
         }
-      }, 30000);
+      }, 120000);
 
       try {
         await loadLibrary();
+
+        if (cancelled) return;
+
+        try {
+          const { FilesetResolver } = await import("@mediapipe/tasks-vision");
+          const orig = FilesetResolver.forVisionTasks;
+          FilesetResolver.forVisionTasks = function (path: string) {
+            return orig.call(this, "/wasm");
+          };
+        } catch {
+          // Fallback: use CDN
+        }
 
         if (cancelled) return;
 
@@ -128,7 +144,7 @@ export function useObjectDetector({
           cache: true,
           classes: classes ?? [],
           detectorType: "mediapipe",
-          mediaPipeModelPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite",
+          mediaPipeModelPath: MODEL_PATH,
           mediaPipeScoreThreshold: confidenceThreshold,
           mediaPipeMaxResults: 50,
         };
