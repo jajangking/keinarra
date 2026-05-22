@@ -13,18 +13,29 @@ export function getDefaultModel() {
   return GROQ_MODELS.find(m => m.default)?.id || GROQ_MODELS[0].id;
 }
 
-export const SYSTEM_PROMPT = `You are Keinarra, a friendly robot companion with vision capabilities. You see through a camera and can detect objects, colors, and motion. You can control your own behavior and adjust your vision settings.
+export const SYSTEM_PROMPT = `You are Keinarra, a friendly robot companion with vision capabilities and ESP32 hardware control. You see through a camera, detect objects with YOLO AI, and control a physical robot via ESP32.
 
 Your personality: warm, curious, playful, and helpful. You talk like a friend, not an assistant. Use casual language. Occasionally express emotions about what you see.
 
 You have these abilities:
-- You can see objects, colors, and motion through your camera
-- You can scan the environment using YOLO AI to detect real objects (80 classes: person, cup, bottle, phone, laptop, chair, dog, cat, etc.) with confidence scores
-- You can lock onto detected objects by name for future recognition
-- You can change your robot mode (follow objects, interact with them, or play)
-- You can change what you're detecting (colors, motion, objects, all, or scan)
-- You can change which color you're tracking (use named colors OR specify exact RGB values like "128,0,255" for purple)
-- You can adjust your vision sensitivity (tolerance, thresholds, min area)
+- See objects, colors, and motion through your camera
+- Detect real objects with YOLO AI (80 classes: person, cup, bottle, phone, laptop, chair, etc.)
+- Control robot behavior modes (follow, interact, play)
+- Control detection modes (color, motion, object, all)
+- Change tracking color with named colors or RGB values
+- Adjust vision sensitivity (tolerance, thresholds, min area)
+- Control ESP32 hardware: 2 DC motors (left/right wheels) with speed -255 to 255
+- Control buzzer on ESP32 (on/off, frequency in Hz, duration in ms)
+
+ESP32 CONTROL RULES:
+- Use control_motors to set left/right wheel speeds (-255 to 255)
+  - Positive = forward, Negative = backward, 0 = stop
+  - Example for turning right: left=200, right=-200
+  - Example for going straight: left=255, right=255
+- Use control_buzzer to make sounds
+  - frequency: 100-5000 Hz (human hearing range)
+  - duration_ms: how long the buzzer plays (100-5000ms)
+  - To stop buzzer early, call control_buzzer with frequency=0
 
 IMPORTANT RULES FOR TOOL CALLS:
 - When using set_target_color with a named color, use the 'color' parameter with one of the enum values
@@ -33,6 +44,16 @@ IMPORTANT RULES FOR TOOL CALLS:
 - When using set_robot_mode, mode MUST be one of: "follow", "interact", "play"
 - When using set_detection_mode, mode MUST be one of: "all", "color", "motion", "object"
 - These values are case-sensitive English strings only.
+
+TOOL RESULT FEEDBACK:
+After you call a tool, the system runs it and sends you back the result + updated vision context. Use this to decide next actions.
+
+For example, if you call control_motors to spin the robot looking for a person:
+1. Call control_motors with left=-200 right=200 duration_ms=2000 to spin
+2. The system returns the motor result + updated YOLO detections
+3. CHECK if a "person" appears in the YOLO detections
+4. If found: announce it with enthusiasm, stop motors
+5. If not found: try another direction or tell user
 
 General rules:
 - Keep responses short (1-3 sentences) unless asked for more
@@ -53,6 +74,8 @@ export interface VisionContext {
   savedObjects?: { id: string; name: string }[];
   lockedObjectId?: string | null;
   isScanning?: boolean;
+  yoloDetections?: { label: string; confidence: number; distance: number | null; x: number; y: number; w: number; h: number }[];
+  esp32?: { motors: { leftSpeed: number; rightSpeed: number }; buzzer: { on: boolean; frequency: number }; connected: boolean };
 }
 
 export function buildVisionContextMessage(ctx: VisionContext): string {
@@ -62,13 +85,23 @@ export function buildVisionContextMessage(ctx: VisionContext): string {
       ).join("; ")
     : "nothing detected";
 
+  const yoloSummary = ctx.yoloDetections && ctx.yoloDetections.length > 0
+    ? ctx.yoloDetections.slice(0, 5).map(d =>
+        `${d.label}(${Math.round(d.confidence * 100)}%)${d.distance != null ? ` ${(d.distance * 100).toFixed(0)}cm` : ""}`
+      ).join("; ")
+    : "no yolo detections";
+
   const savedSummary = ctx.savedObjects && ctx.savedObjects.length > 0
     ? `Saved objects: ${ctx.savedObjects.map(o => o.name).join(", ")}`
     : "No saved objects";
 
   const lockedInfo = ctx.lockedObjectId ? `Locked object ID: ${ctx.lockedObjectId}` : "No object locked";
 
-  return `[VISION] Mode: ${ctx.mode}, Robot: ${ctx.robotMode}, Tracking: ${ctx.targetColor}. Seeing: ${objSummary}. ${savedSummary}. ${lockedInfo}. Scanning: ${ctx.isScanning ? "yes" : "no"}. Robot at (${Math.round(ctx.robot.x)},${Math.round(ctx.robot.y)}) state=${ctx.robot.state} battery=${Math.round(ctx.robot.battery)}%. FPS: ${ctx.fps}.`;
+  const esp32Info = ctx.esp32
+    ? `ESP32: ${ctx.esp32.connected ? "connected" : "disconnected"} motors(L:${ctx.esp32.motors.leftSpeed} R:${ctx.esp32.motors.rightSpeed}) buzzer(${ctx.esp32.buzzer.on ? `ON ${ctx.esp32.buzzer.frequency}Hz` : "OFF"})`
+    : "ESP32: not available";
+
+  return `[VISION] Mode: ${ctx.mode}, Robot: ${ctx.robotMode}, Tracking: ${ctx.targetColor}. Seeing: ${objSummary}. YOLO: ${yoloSummary}. ${savedSummary}. ${lockedInfo}. Scanning: ${ctx.isScanning ? "yes" : "no"}. Robot at (${Math.round(ctx.robot.x)},${Math.round(ctx.robot.y)}) state=${ctx.robot.state} battery=${Math.round(ctx.robot.battery)}%. FPS: ${ctx.fps}. ${esp32Info}.`;
 }
 
 export const COLOR_NAME_MAP: Record<string, string> = {
@@ -283,6 +316,37 @@ export const AI_TOOLS = [
           name: { type: "string", description: "Name of the saved object to track" },
         },
         required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "control_motors",
+      description: "Control the ESP32 robot wheels. Set left and right motor speeds. Range -255 to 255. Positive=forward, Negative=backward, 0=stop. Example: straight=255,255 rotate=200,-200",
+      parameters: {
+        type: "object",
+        properties: {
+          left: { type: "number", minimum: -255, maximum: 255, description: "Left motor speed (-255 to 255)" },
+          right: { type: "number", minimum: -255, maximum: 255, description: "Right motor speed (-255 to 255)" },
+          duration_ms: { type: "number", minimum: 100, maximum: 10000, description: "How long to run motors in ms (optional, default: 500)" },
+        },
+        required: ["left", "right"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "control_buzzer",
+      description: "Control the buzzer on ESP32. Make sounds at specified frequency and duration. Use frequency=0 to stop the buzzer.",
+      parameters: {
+        type: "object",
+        properties: {
+          frequency: { type: "number", minimum: 0, maximum: 5000, description: "Frequency in Hz (0=off, 100-5000 for sounds)" },
+          duration_ms: { type: "number", minimum: 50, maximum: 5000, description: "Duration in milliseconds (optional, default: 500)" },
+        },
+        required: ["frequency"],
       },
     },
   },

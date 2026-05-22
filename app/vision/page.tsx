@@ -22,7 +22,7 @@ import {
   ModeSelector,
   PlayModePanel, ColorDetectionPanel, MotionDetectionPanel,
   InteractionLog, DetectedObjectsList, DebugLogPanel,
-  VideoFeed, AIChatPanel, ObjectScanPanel,
+  VideoFeed, AIChatPanel, ObjectScanPanel, ESP32Panel,
 } from "@/components/vision";
 
 const W = 640;
@@ -106,6 +106,43 @@ export default function VisionPage() {
     if (typeof window !== "undefined") return Number(localStorage.getItem("focal_length") || "630");
     return 630;
   });
+
+  const [esp32Motors, setEsp32Motors] = useState({ leftSpeed: 0, rightSpeed: 0 });
+  const [esp32Buzzer, setEsp32Buzzer] = useState({ on: false, frequency: 0, duration: 500 });
+  const [esp32Connected, setEsp32Connected] = useState(false);
+  const [serialLog, setSerialLog] = useState<string[]>([]);
+
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const oscillatorRef = useRef<OscillatorNode | null>(null);
+
+  useEffect(() => {
+    if (oscillatorRef.current) {
+      try { oscillatorRef.current.stop(); } catch {}
+      try { oscillatorRef.current.disconnect(); } catch {}
+      oscillatorRef.current = null;
+    }
+
+    if (esp32Buzzer.on && esp32Buzzer.frequency > 0) {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume();
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      const durationSec = esp32Buzzer.duration / 1000;
+      osc.frequency.setValueAtTime(esp32Buzzer.frequency, ctx.currentTime);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationSec);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + durationSec + 0.1);
+      oscillatorRef.current = osc;
+    }
+  }, [esp32Buzzer.on, esp32Buzzer.frequency, esp32Buzzer.duration]);
   const [followDistance, setFollowDistance] = useState(1.0);
   const [calibDist, setCalibDist] = useState("");
   const [selectedCalibId, setSelectedCalibId] = useState<string | null>(null);
@@ -178,6 +215,12 @@ export default function VisionPage() {
     robotMode, playTargets,
     yoloTargetsRef,
     followDistance,
+    motorOverride: robotMode === "manual" ? esp32Motors : undefined,
+    onRobotUpdate: (updatedRobot) => {
+      if (updatedRobot.motorLeft != null && updatedRobot.motorRight != null) {
+        setEsp32Motors({ leftSpeed: updatedRobot.motorLeft, rightSpeed: updatedRobot.motorRight });
+      }
+    },
     onInteractionLog: handleInteractionLog,
     onScore: handleScore,
     onDebugLog: handleDebugLog,
@@ -327,6 +370,17 @@ export default function VisionPage() {
     savedObjects: savedObjects.map(o => ({ id: o.id, name: o.name })),
     lockedObjectId,
     isScanning,
+    yoloDetections: yoloDetections.map(d => ({
+      label: d.label,
+      confidence: d.confidence,
+      distance: d.distance,
+      x: d.x, y: d.y, w: d.w, h: d.h,
+    })),
+    esp32: {
+      motors: esp32Motors,
+      buzzer: esp32Buzzer,
+      connected: esp32Connected,
+    },
   };
 
   const {
@@ -403,6 +457,26 @@ export default function VisionPage() {
           setLockedObjectId(obj.id);
           setInteractionLog(prev => [`AI tracking: ${name}`, ...prev].slice(0, 10));
         }
+      },
+      onControlMotors: (left, right, durationMs) => {
+        setEsp32Motors({ leftSpeed: left, rightSpeed: right });
+        setRobotMode("manual");
+        setSerialLog(prev => [`<< MOTOR:${left},${right}${durationMs ? ` (${durationMs}ms)` : ""}`, ...prev].slice(0, 100));
+        if (durationMs) {
+          setTimeout(() => {
+            setEsp32Motors({ leftSpeed: 0, rightSpeed: 0 });
+            setSerialLog(prev => [`<< MOTOR:0,0 (auto-stop after ${durationMs}ms)`, ...prev].slice(0, 100));
+          }, durationMs);
+        }
+      },
+      onControlBuzzer: (frequency, durationMs) => {
+        setEsp32Buzzer({ on: frequency > 0, frequency, duration: durationMs ?? 500 });
+        setSerialLog(prev => [
+          frequency > 0
+            ? `<< BUZZER:ON:FREQ=${frequency}Hz${durationMs ? ` (${durationMs}ms)` : ""}`
+            : "<< BUZZER:OFF",
+          ...prev,
+        ].slice(0, 100));
       },
     },
   });
@@ -527,8 +601,45 @@ export default function VisionPage() {
     setSelectedForLock(null);
   }, []);
 
+  const simulateEsp32Response = useCallback((cmd: string, response: string) => {
+    setTimeout(() => {
+      setSerialLog(prev => [`>> ${response}`, ...prev].slice(0, 100));
+    }, 150 + Math.random() * 200);
+  }, []);
+
+  const handleSetMotors = useCallback((left: number, right: number) => {
+    setEsp32Motors({ leftSpeed: left, rightSpeed: right });
+    setRobotMode("manual");
+    setSerialLog(prev => [`<< MOTOR:${left},${right}`, ...prev].slice(0, 100));
+    simulateEsp32Response(`MOTOR:${left},${right}`, `ESP32 ACK: motors set L=${left} R=${right}`);
+  }, [simulateEsp32Response]);
+
+  const handleSetBuzzer = useCallback((freq: number) => {
+    setEsp32Buzzer({ on: freq > 0, frequency: freq, duration: freq > 0 ? 500 : 0 });
+    setSerialLog(prev => [
+      freq > 0 ? `<< BUZZER:ON:FREQ=${freq}Hz (500ms)` : "<< BUZZER:OFF",
+      ...prev,
+    ].slice(0, 100));
+    simulateEsp32Response(
+      freq > 0 ? `BUZZER:${freq}` : "BUZZER:OFF",
+      freq > 0 ? `ESP32 ACK: buzzer ON at ${freq}Hz` : "ESP32 ACK: buzzer OFF"
+    );
+  }, [simulateEsp32Response]);
+
+  const handleEsp32Connect = useCallback(() => {
+    setEsp32Connected(true);
+    setSerialLog(prev => [">> ESP32 CONNECTED (Web Serial)", ...prev].slice(0, 100));
+  }, []);
+
+  const handleEsp32Disconnect = useCallback(() => {
+    setEsp32Connected(false);
+    setEsp32Motors({ leftSpeed: 0, rightSpeed: 0 });
+    setEsp32Buzzer({ on: false, frequency: 0, duration: 0 });
+    setSerialLog(prev => [">> ESP32 DISCONNECTED", ...prev].slice(0, 100));
+  }, []);
+
   const resetRobot = () => {
-    setRobot({ x: W / 2, y: H / 2, angle: 0, speed: 0, targetX: W / 2, targetY: H / 2, state: "idle", battery: 100 });
+    setRobot({ x: W / 2, y: H / 2, angle: 0, speed: 0, targetX: W / 2, targetY: H / 2, state: "idle", battery: 100, motorLeft: 0, motorRight: 0 });
     setScore(0);
     setInteractionLog([]);
     setPlayTargets([]);
@@ -872,6 +983,18 @@ export default function VisionPage() {
               />
             )}
 
+            <ESP32Panel
+              leftSpeed={esp32Motors.leftSpeed}
+              rightSpeed={esp32Motors.rightSpeed}
+              buzzerOn={esp32Buzzer.on}
+              buzzerFreq={esp32Buzzer.frequency}
+              connected={esp32Connected}
+              serialLog={serialLog}
+              onSetMotors={handleSetMotors}
+              onSetBuzzer={handleSetBuzzer}
+              onConnect={handleEsp32Connect}
+              onDisconnect={handleEsp32Disconnect}
+            />
             <InteractionLog logs={interactionLog} />
             <DetectedObjectsList objects={objects} />
             <DebugLogPanel logs={debugLog} />

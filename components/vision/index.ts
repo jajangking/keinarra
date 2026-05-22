@@ -9,3 +9,4 @@ export { DebugLogPanel } from "./DebugLogPanel";
 export { VideoFeed } from "./VideoFeed";
 export { AIChatPanel } from "./AIChatPanel";
 export { ObjectScanPanel } from "./ObjectScanPanel";
+export { ESP32Panel } from "./ESP32Panel";

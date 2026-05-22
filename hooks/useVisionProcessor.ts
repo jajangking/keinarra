@@ -2,7 +2,7 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import type { DetectedObject, RobotState, PlayTarget, RobotMode, DebugLogEntry } from "@/lib/vision/types";
 import type { CustomColorRange } from "@/lib/vision/color";
 import { processFrame } from "@/lib/vision/detection";
-import { updateRobot } from "@/lib/vision/robot";
+import { updateRobot, robotToMotors } from "@/lib/vision/robot";
 
 const W = 640;
 const H = 480;
@@ -32,14 +32,17 @@ interface UseVisionProcessorOptions {
   playTargets: PlayTarget[];
   yoloTargetsRef?: React.MutableRefObject<YoloTarget[]>;
   followDistance?: number;
+  motorOverride?: { leftSpeed: number; rightSpeed: number };
   onInteractionLog: (msg: string) => void;
   onScore: (delta: number) => void;
   onDebugLog: (log: DebugLogEntry) => void;
+  onRobotUpdate?: (robot: RobotState) => void;
 }
 
 const initialRobotState: RobotState = {
   x: W / 2, y: H / 2, angle: 0, speed: 0,
   targetX: W / 2, targetY: H / 2, state: "idle", battery: 100,
+  motorLeft: 0, motorRight: 0,
 };
 
 const COLOR_MAP: Record<string, string> = {
@@ -278,6 +281,7 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
       playTargets: opts.playTargets,
       yoloTargets: opts.yoloTargetsRef?.current,
       followDistance: opts.followDistance,
+      motorOverride: opts.motorOverride,
       onInteractionLog: opts.onInteractionLog,
       onScore: opts.onScore,
     });
@@ -321,6 +325,8 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
       setRobot(updatedRobot);
       setObjects(detected);
     }
+
+    opts.onRobotUpdate?.(updatedRobot);
 
     const videoEl = videoElRef.current;
     if (videoEl && videoEl.clientWidth > 0 && videoEl.clientHeight > 0) {

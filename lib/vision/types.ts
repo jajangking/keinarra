@@ -1,5 +1,5 @@
 export type DetectionMode = "color" | "motion" | "object" | "all" | "scan" | "yolo";
-export type RobotMode = "follow" | "interact" | "play";
+export type RobotMode = "follow" | "interact" | "play" | "manual";
 
 export interface DetectedObject {
   id: string;
@@ -22,6 +22,8 @@ export interface RobotState {
   targetY: number;
   state: "idle" | "moving" | "interacting" | "playing";
   battery: number;
+  motorLeft?: number;
+  motorRight?: number;
 }
 
 export interface PlayTarget {
@@ -39,6 +41,22 @@ export interface RegionResult {
   h: number;
   area: number;
   perimeter: number;
+}
+
+export interface MotorState {
+  leftSpeed: number;
+  rightSpeed: number;
+}
+
+export interface BuzzerState {
+  on: boolean;
+  frequency: number;
+}
+
+export interface Esp32State {
+  motors: MotorState;
+  buzzer: BuzzerState;
+  connected: boolean;
 }
 
 export interface DebugLogEntry {

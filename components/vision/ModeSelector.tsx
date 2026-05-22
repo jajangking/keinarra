@@ -11,6 +11,7 @@ const ROBOT_LABELS: Record<RobotMode, string> = {
   follow: "Ikuti",
   interact: "Interaksi",
   play: "Main",
+  manual: "Manual",
 };
 
 const DETECTION_LABELS: Record<DetectionMode, string> = {
@@ -27,8 +28,8 @@ export function ModeSelector({ robotMode, detectionMode, onRobotModeChange, onDe
     <>
       <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
         <h2 className="text-lg font-semibold mb-3">Mode Robot</h2>
-        <div className="grid grid-cols-3 gap-2">
-          {(["follow", "interact", "play"] as RobotMode[]).map((m) => (
+        <div className="grid grid-cols-4 gap-2">
+          {(["follow", "interact", "play", "manual"] as RobotMode[]).map((m) => (
             <button
               key={m}
               onClick={() => onRobotModeChange(m)}
