@@ -109,10 +109,19 @@ export function useObjectDetector({
     if (!enabled) return;
 
     let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const init = async () => {
+      timeoutId = setTimeout(() => {
+        if (!cancelled) {
+          setError("YOLO model loading timed out. Check your internet connection or try again.");
+        }
+      }, 30000);
+
       try {
         await loadLibrary();
+
+        if (cancelled) return;
 
         const detectorConfig: Record<string, unknown> = {
           confidence: confidenceThreshold,
@@ -133,12 +142,19 @@ export function useObjectDetector({
           return;
         }
 
+        if (timeoutId) clearTimeout(timeoutId);
         detectorRef.current = detector;
         setIsReady(true);
         setError(null);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to init YOLO detector");
+          if (timeoutId) clearTimeout(timeoutId);
+          const msg = err instanceof Error ? err.message : "Failed to init YOLO detector";
+          if (msg.includes("NetworkError") || msg.includes("Failed to fetch") || msg.includes("LOAD")) {
+            setError("Cannot download YOLO model. Try using a different network or mode.");
+          } else {
+            setError(msg);
+          }
         }
       }
     };
@@ -147,6 +163,7 @@ export function useObjectDetector({
 
     return () => {
       cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
       detectorRef.current?.dispose();
       detectorRef.current = null;
       setIsReady(false);
