@@ -63,6 +63,16 @@ export default function YoloPage() {
     setTimeout(() => setBuzzerOn(false), 1200);
   }, [buzzerStart]);
 
+  const handleDirectBuzzer = useCallback((pattern: string) => {
+    if (pattern === "off") {
+      setBuzzerOn(false);
+      return;
+    }
+    setBuzzerOn(true);
+    buzzerStart(pattern as "found" | "search" | "lost" | "excited" | "chirp" | "tired");
+    setTimeout(() => setBuzzerOn(false), 1200);
+  }, [buzzerStart]);
+
   const { state: searchState } = useRobotSearch({
     detections: dets,
     onMotors: handleMotors,
@@ -86,6 +96,7 @@ export default function YoloPage() {
       interaction.start({
         onMotors: handleMotors,
         onBuzzer: handleBuzzer,
+        onDirectBuzzer: handleDirectBuzzer,
         onStartSTT: sttEnabled ? sttStart : undefined,
         audioManager: sttEnabled ? audio : undefined,
       });
@@ -148,6 +159,7 @@ export default function YoloPage() {
       interaction.start({
         onMotors: handleMotors,
         onBuzzer: handleBuzzer,
+        onDirectBuzzer: handleDirectBuzzer,
         onStartSTT: sttEnabled ? sttStart : undefined,
         audioManager: sttEnabled ? audio : undefined,
       });

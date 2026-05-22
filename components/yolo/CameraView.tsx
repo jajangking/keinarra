@@ -2,6 +2,23 @@
 
 import { useRef, useState, useCallback, useEffect } from "react";
 
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite";
+const WASM_PATH = "/wasm";
+
+async function initDetector() {
+  const { FilesetResolver, ObjectDetector } = await import("@mediapipe/tasks-vision");
+  const vision = await FilesetResolver.forVisionTasks(WASM_PATH);
+  const res = await fetch(MODEL_URL);
+  if (!res.ok) throw new Error(`Failed to fetch model: HTTP ${res.status}`);
+  const modelBuffer = await res.arrayBuffer();
+  const detector = await ObjectDetector.createFromOptions(vision, {
+    baseOptions: { modelAssetBuffer: new Uint8Array(modelBuffer) },
+    scoreThreshold: 0.5,
+    maxResults: 50,
+  });
+  return detector;
+}
+
 const W = 640;
 const H = 480;
 
@@ -46,44 +63,49 @@ export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
   // Init YOLO
   useEffect(() => {
     let cancelled = false;
+    let detector: Awaited<ReturnType<typeof initDetector>> | null = null;
     (async () => {
       try {
-        const lib = await import("rtmlib-ts");
-        const { ObjectDetector } = lib;
-        const det = new (ObjectDetector as new (config: unknown) => {
-          init(): Promise<void>;
-          detectFromCanvas(canvas: HTMLCanvasElement): Promise<{ bbox: { x1: number; y1: number; x2: number; y2: number }; className: string; confidence: number }[]>;
-          dispose(): void;
-        })({
-          confidence: 0.5, cache: true, detectorType: "mediapipe",
-          mediaPipeModelPath: "/models/efficientdet_lite0.tflite",
-          mediaPipeScoreThreshold: 0.5, mediaPipeMaxResults: 50,
-        });
-        await det.init();
+        detector = await initDetector();
         if (!cancelled) {
+          const det = detector;
           detectorRef.current = {
             detect: async (frame: ImageData) => {
               const off = document.createElement("canvas");
               off.width = frame.width; off.height = frame.height;
               const ctx = off.getContext("2d")!;
               ctx.putImageData(frame, 0, 0);
-              const r = await det.detectFromCanvas(off);
-              return r.map(d => ({
-                label: d.className, confidence: d.confidence,
-                x: d.bbox.x1, y: d.bbox.y1,
-                w: d.bbox.x2 - d.bbox.x1, h: d.bbox.y2 - d.bbox.y1,
-              }));
+              const result = await det.detect(off);
+              if (!result.detections) return [];
+              return result.detections.map(d => {
+                const cat = d.categories?.[0];
+                const box = d.boundingBox;
+                if (!cat || !box) return null;
+                return {
+                  label: cat.categoryName,
+                  confidence: cat.score,
+                  x: box.originX,
+                  y: box.originY,
+                  w: box.width,
+                  h: box.height,
+                };
+              }).filter(Boolean) as { label: string; confidence: number; x: number; y: number; w: number; h: number }[];
             },
           };
           setYoloReady(true);
           onReady?.(true);
+        } else {
+          detector?.close();
         }
       } catch (e) {
         console.error("YOLO init error:", e);
         onReady?.(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      detector?.close();
+    };
   }, [onReady]);
 
   // Camera
