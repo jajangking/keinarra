@@ -37,11 +37,19 @@ export function ESP32Control({
   const [ip, setIp] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectRef = useRef(0);
+  const reconnectTimerRef = useRef(0);
+  const reconnectAttemptRef = useRef(0);
+  const lastSentMotorsRef = useRef({ l: 0, r: 0 });
+  const connectedRef = useRef(false);
+  const ipRef = useRef("");
 
   const addLog = useCallback((msg: string) => {
     setLog(prev => [msg, ...prev].slice(0, 50));
   }, []);
+
+  // Keep refs in sync
+  useEffect(() => { connectedRef.current = connected; }, [connected]);
+  useEffect(() => { ipRef.current = ip; }, [ip]);
 
   const wsSend = useCallback((cmd: string) => {
     addLog(cmd);
@@ -50,12 +58,15 @@ export function ESP32Control({
     }
   }, [addLog]);
 
-  const setMotors = useCallback((l: number, r: number) => {
+  const sendMotors = useCallback((l: number, r: number) => {
+    l = Math.max(-255, Math.min(255, Math.round(l)));
+    r = Math.max(-255, Math.min(255, Math.round(r)));
+    if (l === lastSentMotorsRef.current.l && r === lastSentMotorsRef.current.r) return;
+    lastSentMotorsRef.current = { l, r };
     wsSend(`<< MOTOR:${l},${r}`);
-    onMotors?.(l, r);
-  }, [wsSend, onMotors]);
+  }, [wsSend]);
 
-  const handleBuzzer = useCallback((pattern: string) => {
+  const sendBuzzer = useCallback((pattern: string) => {
     if (pattern === "off") {
       wsSend("<< BUZZER:OFF");
       onBuzzer?.("off");
@@ -66,49 +77,31 @@ export function ESP32Control({
     onBuzzer?.(pattern);
   }, [wsSend, onBuzzer]);
 
-  const l = externalLeft ?? 0;
-  const r = externalRight ?? 0;
-  const buz = externalBuzzer ?? false;
-
-  // Keyboard
-  useEffect(() => {
-    const keys = new Set<string>();
-    const interval = setInterval(() => {
-      if (!connected) return;
-      if (keys.has("ArrowUp") && keys.has("ArrowLeft")) setMotors(100, 200);
-      else if (keys.has("ArrowUp") && keys.has("ArrowRight")) setMotors(200, 100);
-      else if (keys.has("ArrowDown") && keys.has("ArrowLeft")) setMotors(-100, -200);
-      else if (keys.has("ArrowDown") && keys.has("ArrowRight")) setMotors(-200, -100);
-      else if (keys.has("ArrowUp")) setMotors(255, 255);
-      else if (keys.has("ArrowDown")) setMotors(-255, -255);
-      else if (keys.has("ArrowLeft")) setMotors(-200, 200);
-      else if (keys.has("ArrowRight")) setMotors(200, -200);
-      else if (keys.has(" ")) handleBuzzer(buz ? "off" : "chirp");
-      if (keys.size === 0) setMotors(0, 0);
-    }, 100);
-
-    const down = (e: KeyboardEvent) => { keys.add(e.key); if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault(); };
-    const up = (e: KeyboardEvent) => { keys.delete(e.key); };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => { clearInterval(interval); window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, [connected, buz, handleBuzzer, setMotors]);
-
   const connect = useCallback(() => {
     if (!ip.trim()) { addLog(">> Masukkan IP ESP32"); return; }
     const url = `ws://${ip.trim()}:81/`;
     addLog(`>> MENYAMBUNG ${url}`);
+
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      wsRef.current.close();
+    }
+
     const ws = new WebSocket(url);
+    wsRef.current = ws;
 
     ws.onopen = () => {
-      wsRef.current = ws;
-      setConnected(true);
       addLog(">> ESP32 TERHUBUNG");
+      setConnected(true);
+      connectedRef.current = true;
+      reconnectAttemptRef.current = 0;
       onConnect?.();
     };
 
     ws.onmessage = (e) => {
-      addLog(">> " + e.data);
+      const msg = e.data as string;
+      addLog(">> " + msg);
     };
 
     ws.onerror = () => {
@@ -119,16 +112,118 @@ export function ESP32Control({
       if (wsRef.current === ws) {
         wsRef.current = null;
         setConnected(false);
+        connectedRef.current = false;
         addLog(">> ESP32 TERPUTUS");
-        onDisconnect?.();
+
+        const attempt = reconnectAttemptRef.current;
+        if (attempt < 5 && ipRef.current.trim()) {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+          addLog(`>> COBA ULANG ${attempt + 1}/5 dalam ${delay / 1000}s...`);
+          reconnectAttemptRef.current = attempt + 1;
+          reconnectTimerRef.current = window.setTimeout(() => {
+            if (!connectedRef.current) connect();
+          }, delay);
+        } else {
+          addLog(">> GAGAL SAMBUNG, tekan ON buat manual");
+          onDisconnect?.();
+        }
       }
     };
   }, [ip, addLog, onConnect, onDisconnect]);
 
+  useEffect(() => {
+    return () => {
+      clearTimeout(reconnectTimerRef.current);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+      }
+    };
+  }, []);
+
+  // Forward external motor changes to WebSocket
+  useEffect(() => {
+    if (!connected) return;
+    const l = externalLeft ?? 0;
+    const r = externalRight ?? 0;
+    sendMotors(l, r);
+  }, [externalLeft, externalRight, connected, sendMotors]);
+
+  const l = externalLeft ?? 0;
+  const r = externalRight ?? 0;
+  const buz = externalBuzzer ?? false;
+
+  const keyTargetRef = useRef({ l: 0, r: 0 });
+  // Keyboard
+  useEffect(() => {
+    const keys = new Set<string>();
+    let anim = 0;
+    let active = false;
+
+    const loop = () => {
+      if (!connectedRef.current) { anim = requestAnimationFrame(loop); return; }
+
+      if (keys.size === 0) {
+        if (active) {
+          active = false;
+          keyTargetRef.current = { l: 0, r: 0 };
+          sendMotors(0, 0);
+          onMotors?.(0, 0);
+        }
+        anim = requestAnimationFrame(loop);
+        return;
+      }
+
+      active = true;
+
+      if (keys.has("ArrowUp") && keys.has("ArrowLeft")) { keyTargetRef.current = { l: 100, r: 200 }; }
+      else if (keys.has("ArrowUp") && keys.has("ArrowRight")) { keyTargetRef.current = { l: 200, r: 100 }; }
+      else if (keys.has("ArrowDown") && keys.has("ArrowLeft")) { keyTargetRef.current = { l: -100, r: -200 }; }
+      else if (keys.has("ArrowDown") && keys.has("ArrowRight")) { keyTargetRef.current = { l: -200, r: -100 }; }
+      else if (keys.has("ArrowUp")) { keyTargetRef.current = { l: 255, r: 255 }; }
+      else if (keys.has("ArrowDown")) { keyTargetRef.current = { l: -255, r: -255 }; }
+      else if (keys.has("ArrowLeft")) { keyTargetRef.current = { l: -200, r: 200 }; }
+      else if (keys.has("ArrowRight")) { keyTargetRef.current = { l: 200, r: -200 }; }
+      else if (keys.has(" ")) { keys.delete(" "); sendBuzzer(buz ? "off" : "chirp"); }
+
+      const t = keyTargetRef.current;
+      sendMotors(t.l, t.r);
+      onMotors?.(t.l, t.r);
+
+      anim = requestAnimationFrame(loop);
+    };
+
+    const down = (e: KeyboardEvent) => {
+      keys.add(e.key);
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+    };
+    const up = (e: KeyboardEvent) => {
+      keys.delete(e.key);
+    };
+
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    anim = requestAnimationFrame(loop);
+
+    return () => {
+      cancelAnimationFrame(anim);
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      keys.clear();
+      lastSentMotorsRef.current = { l: -999, r: -999 };
+    };
+  }, [connected, buz, sendMotors, sendBuzzer, onMotors, onBuzzer]);
+
   const disconnect = useCallback(() => {
-    wsRef.current?.close();
-    wsRef.current = null;
+    clearTimeout(reconnectTimerRef.current);
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
     setConnected(false);
+    connectedRef.current = false;
     addLog(">> ESP32 DIPUTUSKAN");
     onDisconnect?.();
   }, [addLog, onDisconnect]);
@@ -181,12 +276,12 @@ export function ESP32Control({
 
       {/* Buttons */}
       <div className="grid grid-cols-3 gap-1 px-3 pb-2">
-        <button disabled={!connected} onTouchStart={() => setMotors(255, 255)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
-        <button disabled={!connected} onClick={() => handleBuzzer(buz ? "off" : "chirp")} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
-        <button disabled={!connected} onTouchStart={() => setMotors(-255, -255)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
-        <button disabled={!connected} onTouchStart={() => setMotors(-200, 200)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
-        <button disabled={!connected} onClick={() => setMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>
-        <button disabled={!connected} onTouchStart={() => setMotors(200, -200)} onTouchEnd={() => setMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">►</button>
+        <button disabled={!connected} onTouchStart={() => sendMotors(255, 255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
+        <button disabled={!connected} onClick={() => sendBuzzer(buz ? "off" : "chirp")} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
+        <button disabled={!connected} onTouchStart={() => sendMotors(-255, -255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
+        <button disabled={!connected} onTouchStart={() => sendMotors(-200, 200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
+        <button disabled={!connected} onClick={() => sendMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>
+        <button disabled={!connected} onTouchStart={() => sendMotors(200, -200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">►</button>
       </div>
 
       {/* Motor bars */}
