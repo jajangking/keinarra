@@ -34,7 +34,10 @@ export function ESP32Control({
 }: ESP32ControlProps) {
   const [connected, setConnected] = useState(false);
   const [log, setLog] = useState<string[]>([]);
-  const [ip, setIp] = useState("");
+  const [ip, setIp] = useState(() => {
+    if (typeof window === "undefined") return "";
+    try { return localStorage.getItem("esp32_ip") ?? ""; } catch { return ""; }
+  });
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef(0);
@@ -50,6 +53,9 @@ export function ESP32Control({
   // Keep refs in sync
   useEffect(() => { connectedRef.current = connected; }, [connected]);
   useEffect(() => { ipRef.current = ip; }, [ip]);
+  useEffect(() => {
+    try { localStorage.setItem("esp32_ip", ip); } catch {}
+  }, [ip]);
 
   const wsSend = useCallback((cmd: string) => {
     addLog(cmd);
@@ -169,23 +175,6 @@ export function ESP32Control({
       buzzerActiveRef.current = false;
     }
   }, [buz, connected, wsSend]);
-
-  // Background: stop motors when page hidden
-  useEffect(() => {
-    const onHide = () => {
-      sendMotors(0, 0);
-      onMotors?.(0, 0);
-    };
-    const onVis = () => {
-      if (document.hidden) onHide();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("blur", onHide);
-    return () => {
-      document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("blur", onHide);
-    };
-  }, [sendMotors, onMotors]);
 
   const currentSpeedRef = useRef({ l: 0, r: 0 });
   const keyTargetRef = useRef({ l: 0, r: 0 });
