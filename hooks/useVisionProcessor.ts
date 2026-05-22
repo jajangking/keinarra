@@ -7,6 +7,16 @@ import { updateRobot } from "@/lib/vision/robot";
 const W = 640;
 const H = 480;
 
+interface YoloTarget {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  distance: number | null;
+  label: string;
+}
+
 interface UseVisionProcessorOptions {
   mode: string;
   targetColor: string;
@@ -20,6 +30,8 @@ interface UseVisionProcessorOptions {
   colorLabel?: string | null;
   robotMode: RobotMode;
   playTargets: PlayTarget[];
+  yoloTargetsRef?: React.MutableRefObject<YoloTarget[]>;
+  followDistance?: number;
   onInteractionLog: (msg: string) => void;
   onScore: (delta: number) => void;
   onDebugLog: (log: DebugLogEntry) => void;
@@ -36,6 +48,8 @@ const COLOR_MAP: Record<string, string> = {
   cyan: "#00ffff", white: "#ffffff",
 };
 
+const TRAIL_LENGTH = 15;
+
 export function useVisionProcessor(options: UseVisionProcessorOptions, containerRef: React.RefObject<HTMLDivElement | null>) {
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const prevFrameRef = useRef<ImageData | null>(null);
@@ -47,6 +61,7 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
   const robotState = useRef<RobotState>({ ...initialRobotState });
   const videoElRef = useRef<HTMLVideoElement | null>(null);
   const overlayCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const trailHistoryRef = useRef<Map<string, { x: number; y: number }[]>>(new Map());
 
   useEffect(() => {
     optionsRef.current = options;
@@ -117,6 +132,20 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
 
     const scaleX = drawW / W;
     const scaleY = drawH / H;
+
+    const trails = trailHistoryRef.current;
+    for (const [, pts] of trails) {
+      if (pts.length < 2) continue;
+      for (let i = 1; i < pts.length; i++) {
+        const alpha = 0.05 + (i / pts.length) * 0.45;
+        octx.strokeStyle = `rgba(0, 200, 255, ${alpha})`;
+        octx.lineWidth = 2;
+        octx.beginPath();
+        octx.moveTo(pts[i - 1].x * scaleX + offsetX, pts[i - 1].y * scaleY + offsetY);
+        octx.lineTo(pts[i].x * scaleX + offsetX, pts[i].y * scaleY + offsetY);
+        octx.stroke();
+      }
+    }
 
     if (detected.length === 0) {
       octx.fillStyle = "rgba(0, 255, 0, 0.05)";
@@ -247,6 +276,8 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
     const updatedRobot = updateRobot(detected, robotState.current, {
       robotMode: opts.robotMode,
       playTargets: opts.playTargets,
+      yoloTargets: opts.yoloTargetsRef?.current,
+      followDistance: opts.followDistance,
       onInteractionLog: opts.onInteractionLog,
       onScore: opts.onScore,
     });
@@ -254,6 +285,37 @@ export function useVisionProcessor(options: UseVisionProcessorOptions, container
     robotState.current = updatedRobot;
     frameCounterRef.current++;
     liveDetectionsRef.current = detected;
+
+    const trails = trailHistoryRef.current;
+    const tracked = new Set<string>();
+
+    for (const obj of detected) {
+      const cx = obj.x + obj.w / 2;
+      const cy = obj.y + obj.h / 2;
+      if (!trails.has(obj.id)) trails.set(obj.id, []);
+      const pts = trails.get(obj.id)!;
+      pts.push({ x: cx, y: cy });
+      if (pts.length > TRAIL_LENGTH) pts.shift();
+      tracked.add(obj.id);
+    }
+
+    const yoloTargets = opts.yoloTargetsRef?.current ?? [];
+    for (const t of yoloTargets) {
+      const trailId = t.id;
+      const cx = t.x + t.w / 2;
+      const cy = t.y + t.h / 2;
+      if (!trails.has(trailId)) trails.set(trailId, []);
+      const pts = trails.get(trailId)!;
+      pts.push({ x: cx, y: cy });
+      if (pts.length > TRAIL_LENGTH) pts.shift();
+      tracked.add(trailId);
+    }
+
+    for (const [id, pts] of trails) {
+      if (tracked.has(id)) continue;
+      if (pts.length > 0) pts.shift();
+      if (pts.length === 0) trails.delete(id);
+    }
 
     if (frameCounterRef.current % 3 === 0) {
       setRobot(updatedRobot);

@@ -23,7 +23,9 @@ interface VideoFeedProps {
   scannedObjects?: { id: string; x: number; y: number; w: number; h: number }[];
   selectedForLock?: string | null;
   onScanObjectClick?: (id: string) => void;
-  yoloDetections?: { id: string; label: string; confidence: number; x: number; y: number; w: number; h: number; color: string }[];
+  yoloDetections?: { id: string; label: string; confidence: number; x: number; y: number; w: number; h: number; color: string; distance?: number | null }[];
+  selectedCalibId?: string | null;
+  onYoloClick?: (id: string) => void;
   yoloReady?: boolean;
   yoloFps?: number;
   yoloError?: string | null;
@@ -50,7 +52,8 @@ export function VideoFeed({
   onColorConfirm, onColorCancel,
   dragSelectEnabled, onDragSelect, dragSelection,
   isScanning, useYolo, scannedObjects, selectedForLock, onScanObjectClick,
-  yoloDetections, yoloReady, yoloFps: _yoloFps, yoloError,
+  yoloDetections, selectedCalibId, onYoloClick,
+  yoloReady, yoloFps: _yoloFps, yoloError,
   fps, aiEnabled, aiThinking,
 }: VideoFeedProps) {
   const videoWrapperRef = useRef<HTMLDivElement>(null);
@@ -263,35 +266,44 @@ export function VideoFeed({
 
         {/* YOLO live detections */}
         {useYolo && yoloDetections && yoloDetections.length > 0 && (
-          <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 7 }}>
+          <div className="absolute inset-0" style={{ zIndex: 7 }}>
             {yoloDetections.map((det) => {
               const left = (det.x / FW) * 100;
               const top = (det.y / FH) * 100;
               const width = (det.w / FW) * 100;
               const height = (det.h / FH) * 100;
+              const isSelected = selectedCalibId === det.id;
               return (
-                <div
+                <button
                   key={det.id}
-                  className="absolute"
+                  onClick={() => onYoloClick?.(det.id)}
+                  className="absolute pointer-events-auto transition-all"
                   style={{
                     left: `${left}%`,
                     top: `${top}%`,
                     width: `${width}%`,
                     height: `${height}%`,
-                    border: `2px solid ${det.color}`,
-                    boxShadow: `0 0 8px ${det.color}40`,
+                    border: `2px ${isSelected ? 'solid' : 'solid'} ${isSelected ? '#06b6d4' : det.color}`,
+                    backgroundColor: isSelected ? 'rgba(6, 182, 212, 0.15)' : 'transparent',
+                    boxShadow: isSelected ? `0 0 16px rgba(6, 182, 212, 0.4)` : `0 0 8px ${det.color}40`,
+                    cursor: 'pointer',
                   }}
                 >
                   <span
-                    className="absolute -top-5 left-0 text-[10px] font-mono font-bold px-1 rounded"
+                    className="absolute -top-5 left-0 text-[10px] font-mono font-bold px-1 rounded whitespace-nowrap"
                     style={{
-                      backgroundColor: det.color,
+                      backgroundColor: isSelected ? '#06b6d4' : det.color,
                       color: "#000",
                     }}
                   >
-                    {det.label} {Math.round(det.confidence * 100)}%
+                    {det.label} {Math.round(det.confidence * 100)}%{det.distance != null ? ` ${det.distance >= 1 ? `${det.distance.toFixed(1)}m` : `${(det.distance * 100).toFixed(0)}cm`}` : ""}
                   </span>
-                </div>
+                  {isSelected && (
+                    <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[9px] font-mono text-cyan-400 animate-pulse whitespace-nowrap">
+                      Selected
+                    </span>
+                  )}
+                </button>
               );
             })}
           </div>

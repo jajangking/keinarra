@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from "react";
+import { estimateDistanceFromBbox, estimateFocalLength } from "@/lib/vision/distance";
 
 interface RtmlibDetection {
   bbox: { x1: number; y1: number; x2: number; y2: number; confidence: number };
@@ -38,6 +39,7 @@ export interface YoloDetection {
   w: number;
   h: number;
   classId: number;
+  distance: number | null;
 }
 
 interface UseObjectDetectorOptions {
@@ -47,6 +49,7 @@ interface UseObjectDetectorOptions {
   onDetections?: (detections: YoloDetection[]) => void;
   targetWidth?: number;
   targetHeight?: number;
+  focalLength?: number;
 }
 
 const COLOR_MAP: Record<string, string> = {
@@ -85,6 +88,7 @@ export function useObjectDetector({
   onDetections,
   targetWidth = 640,
   targetHeight = 480,
+  focalLength,
 }: UseObjectDetectorOptions = {}) {
   const detectorRef = useRef<ObjectDetectorInstance | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -149,6 +153,8 @@ export function useObjectDetector({
     };
   }, [enabled, confidenceThreshold, classes]);
 
+  const smoothDistRef = useRef<Map<string, number>>(new Map());
+
   const detectFrame = useCallback(async (video: HTMLVideoElement) => {
     if (!detectorRef.current || !video.readyState || video.readyState < 2 || video.videoWidth === 0 || video.paused) {
       animFrameRef.current = requestAnimationFrame(() => detectFnRef.current?.(video));
@@ -174,16 +180,33 @@ export function useObjectDetector({
       const vh = video.videoHeight || targetHeight;
       const sx = targetWidth / vw;
       const sy = targetHeight / vh;
-      const mapped: YoloDetection[] = results.map((r: RtmlibDetection) => ({
-        id: `yolo-${nextIdRef.current++}`,
-        label: r.className,
-        confidence: r.confidence,
-        x: r.bbox.x1 * sx,
-        y: r.bbox.y1 * sy,
-        w: (r.bbox.x2 - r.bbox.x1) * sx,
-        h: (r.bbox.y2 - r.bbox.y1) * sy,
-        classId: r.classId,
-      }));
+      const fl = focalLength ?? estimateFocalLength(targetWidth, targetHeight);
+      const smooth = smoothDistRef.current;
+      const alpha = 0.3;
+      const mapped: YoloDetection[] = results.map((r: RtmlibDetection) => {
+        const bw = (r.bbox.x2 - r.bbox.x1) * sx;
+        const bh = (r.bbox.y2 - r.bbox.y1) * sy;
+        const raw = estimateDistanceFromBbox(bw, bh, r.className, fl, targetHeight);
+        const prev = smooth.get(r.className);
+        let dist: number | null;
+        if (raw != null && prev != null) {
+          dist = alpha * raw + (1 - alpha) * prev;
+        } else {
+          dist = raw;
+        }
+        if (dist != null) smooth.set(r.className, dist);
+        return {
+          id: `yolo-${nextIdRef.current++}`,
+          label: r.className,
+          confidence: r.confidence,
+          x: r.bbox.x1 * sx,
+          y: r.bbox.y1 * sy,
+          w: bw,
+          h: bh,
+          classId: r.classId,
+          distance: dist,
+        };
+      });
 
       setDetections(mapped);
       onDetections?.(mapped);

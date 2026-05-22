@@ -215,6 +215,19 @@ export function processFrame(
   return detected;
 }
 
+function computeIoU(
+  ax: number, ay: number, aw: number, ah: number,
+  bx: number, by: number, bw: number, bh: number,
+): number {
+  const xOverlap = Math.max(0, Math.min(ax + aw, bx + bw) - Math.max(ax, bx));
+  const yOverlap = Math.max(0, Math.min(ay + ah, by + bh) - Math.max(ay, by));
+  const intersection = xOverlap * yOverlap;
+  const areaA = aw * ah;
+  const areaB = bw * bh;
+  const union = areaA + areaB - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
 function trackObjects(
   detected: DetectedObject[],
   trackedObjectsRef: React.MutableRefObject<Map<string, { x: number; y: number; w: number; h: number; lastSeen: number }>>,
@@ -222,27 +235,22 @@ function trackObjects(
   nextIdRef: React.MutableRefObject<number>
 ) {
   const tracked = trackedObjectsRef.current;
-  const maxDistSq = 2500;
   const usedIds = new Set<string>();
 
   for (const obj of detected) {
     let assignedId = "";
-    let bestDistSq = maxDistSq;
-    const objCx = obj.x + (obj.w >> 1);
-    const objCy = obj.y + (obj.h >> 1);
+    let bestScore = 0;
 
     for (const [id, t] of tracked) {
       if (usedIds.has(id)) continue;
-      const dx = objCx - (t.x + (t.w >> 1));
-      const dy = objCy - (t.y + (t.h >> 1));
-      const distSq = dx * dx + dy * dy;
-      if (distSq < bestDistSq) {
-        bestDistSq = distSq;
+      const iou = computeIoU(obj.x, obj.y, obj.w, obj.h, t.x, t.y, t.w, t.h);
+      if (iou > bestScore) {
+        bestScore = iou;
         assignedId = id;
       }
     }
 
-    if (!assignedId) {
+    if (!assignedId || bestScore < 0.15) {
       assignedId = `obj-${nextIdRef.current++}`;
     }
 
@@ -253,7 +261,7 @@ function trackObjects(
 
   const fc = frameCountRef.current;
   for (const [id, t] of tracked) {
-    if (fc - t.lastSeen > 30) {
+    if (fc - t.lastSeen > 10) {
       tracked.delete(id);
     }
   }

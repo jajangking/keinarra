@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useCallback, useEffect } from "react";
+import { useRef, useState, useCallback, useEffect, useMemo } from "react";
 import type { DetectionMode, RobotMode, PlayTarget, DebugLogEntry } from "@/lib/vision/types";
 import type { CustomColorRange } from "@/lib/vision/color";
 import type { SavedColor } from "@/lib/vision/saved-colors";
@@ -12,6 +12,7 @@ import { useObjectDetector, getYoloColor } from "@/hooks/useObjectDetector";
 import { getDefaultModel, type VisionContext } from "@/lib/groq";
 import { closestNamedColor, createCustomRangeFromArea, rgbToHsv } from "@/lib/vision/color";
 import { loadSavedColors, addSavedColor, removeSavedColor } from "@/lib/vision/saved-colors";
+import { getKnownHeight } from "@/lib/vision/distance";
 import {
   loadSavedObjects,
   addSavedObject,
@@ -101,10 +102,18 @@ export default function VisionPage() {
   const [savedObjects, setSavedObjects] = useState<SavedObject[]>([]);
   const [lockedObjectId, setLockedObjectId] = useState<string | null>(null);
   const [yoloConfidence, setYoloConfidence] = useState(DEFAULT_SETTINGS.yoloConfidence);
+  const [focalLength, setFocalLength] = useState(() => {
+    if (typeof window !== "undefined") return Number(localStorage.getItem("focal_length") || "630");
+    return 630;
+  });
+  const [followDistance, setFollowDistance] = useState(1.0);
+  const [calibDist, setCalibDist] = useState("");
+  const [selectedCalibId, setSelectedCalibId] = useState<string | null>(null);
 
   const nextScanIdRef = useRef(1);
   const lastFrameRef = useRef<ImageData | null>(null);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const yoloTargetsRef = useRef<{ id: string; x: number; y: number; w: number; h: number; distance: number | null; label: string }[]>([]);
   const isScanningRef = useRef(false);
   const isRunningRef = useRef(false);
   const scannedObjectsRef = useRef<ScannedObject[]>([]);
@@ -167,6 +176,8 @@ export default function VisionPage() {
     motionThreshold, motionMinArea, edgeThreshold, objectMinArea,
     customRangeRef, colorLabel,
     robotMode, playTargets,
+    yoloTargetsRef,
+    followDistance,
     onInteractionLog: handleInteractionLog,
     onScore: handleScore,
     onDebugLog: handleDebugLog,
@@ -251,6 +262,7 @@ export default function VisionPage() {
     classes: null,
     targetWidth: W,
     targetHeight: H,
+    focalLength,
   });
 
   const yoloStartRef = useRef(yoloStart);
@@ -271,6 +283,36 @@ export default function VisionPage() {
       yoloStopRef.current();
     }
   }, [useYolo, isRunning, yoloReady]);
+
+  useEffect(() => {
+    localStorage.setItem("focal_length", String(focalLength));
+  }, [focalLength]);
+
+  const calibTarget = useMemo(() => {
+    if (selectedCalibId) return yoloDetections.find(d => d.id === selectedCalibId) ?? null;
+    return yoloDetections[0] ?? null;
+  }, [selectedCalibId, yoloDetections]);
+
+  const handleCalibrate = useCallback(() => {
+    const realDist = parseFloat(calibDist);
+    if (isNaN(realDist) || realDist <= 0 || !calibTarget) return;
+    const knownH = getKnownHeight(calibTarget.label);
+    if (!knownH) return;
+    const newFl = (realDist * calibTarget.h) / knownH;
+    if (newFl > 50 && newFl < 5000) {
+      setFocalLength(Math.round(newFl));
+      setCalibDist("");
+    }
+  }, [calibDist, calibTarget]);
+
+  useEffect(() => {
+    yoloTargetsRef.current = yoloDetections.map(d => ({
+      id: d.id,
+      x: d.x, y: d.y, w: d.w, h: d.h,
+      distance: d.distance,
+      label: d.label,
+    }));
+  }, [yoloDetections]);
 
   const visionContext: VisionContext = {
     mode,
@@ -508,6 +550,10 @@ export default function VisionPage() {
     setScore(0);
   };
 
+  const handleYoloClick = useCallback((id: string) => {
+    setSelectedCalibId(prev => prev === id ? null : id);
+  }, []);
+
   const handleApiKeySave = (key: string) => {
     setGroqApiKey(key);
     localStorage.setItem("groq_api_key", key);
@@ -583,7 +629,10 @@ export default function VisionPage() {
                 w: d.w,
                 h: d.h,
                 color: getYoloColor(d.label),
+                distance: d.distance,
               }))}
+              selectedCalibId={selectedCalibId}
+              onYoloClick={handleYoloClick}
               yoloReady={yoloReady}
               yoloFps={yoloFps}
               yoloError={yoloError}
@@ -692,19 +741,87 @@ export default function VisionPage() {
             {mode === "yolo" && (
               <div className="bg-zinc-900/60 rounded-xl p-4 border border-zinc-800/50">
                 <h2 className="text-sm font-semibold mb-3 text-zinc-300">YOLO Detection</h2>
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Sensitivity</label>
-                    <span className="text-xs font-mono text-zinc-400">{yoloConfidence}%</span>
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Sensitivity</label>
+                      <span className="text-xs font-mono text-zinc-400">{yoloConfidence}%</span>
+                    </div>
+                    <input
+                      type="range" min="10" max="90" value={yoloConfidence}
+                      onChange={(e) => setYoloConfidence(Number(e.target.value))}
+                      className="w-full accent-cyan-500"
+                    />
+                    <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
+                      <span>Lebih banyak deteksi</span>
+                      <span>Lebih sedikit false positive</span>
+                    </div>
                   </div>
-                  <input
-                    type="range" min="10" max="90" value={yoloConfidence}
-                    onChange={(e) => setYoloConfidence(Number(e.target.value))}
-                    className="w-full accent-cyan-500"
-                  />
-                  <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
-                    <span>Lebih banyak deteksi</span>
-                    <span>Lebih sedikit false positive</span>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Stop Distance</label>
+                      <span className="text-xs font-mono text-zinc-400">{followDistance.toFixed(1)}m</span>
+                    </div>
+                    <input
+                      type="range" min="0.3" max="3.0" step="0.1" value={followDistance}
+                      onChange={(e) => setFollowDistance(Number(e.target.value))}
+                      className="w-full accent-cyan-500"
+                    />
+                    <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
+                      <span>Dekat</span>
+                      <span>Jauh</span>
+                    </div>
+                  </div>
+                  <div className="border-t border-zinc-800/50 pt-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium">Focal Length</label>
+                      <span className="text-xs font-mono text-zinc-400">{focalLength}px</span>
+                    </div>
+                    <input
+                      type="range" min="200" max="3000" step="10" value={focalLength}
+                      onChange={(e) => setFocalLength(Number(e.target.value))}
+                      className="w-full accent-cyan-500"
+                    />
+                    <div className="flex justify-between text-[9px] text-zinc-600 mt-1">
+                      <span>FOV lebar (~120°)</span>
+                      <span>FOV sempit (~12°)</span>
+                    </div>
+                  </div>
+                  <div className="border-t border-zinc-800/50 pt-3">
+                    <h3 className="text-[10px] text-zinc-500 uppercase tracking-wider font-medium mb-2">Kalibrasi Jarak</h3>
+                    <p className="text-[9px] text-zinc-600 mb-2">
+                      Klik objek di video, lalu masukkan jarak real.
+                    </p>
+                    {calibTarget && (
+                      <div className="mb-2 px-2 py-1.5 rounded-lg bg-cyan-900/30 border border-cyan-500/30">
+                        <p className="text-[11px] font-mono text-cyan-300">
+                          {calibTarget.label} · {calibTarget.distance != null
+                            ? `${calibTarget.distance >= 1 ? `${calibTarget.distance.toFixed(1)}m` : `${(calibTarget.distance * 100).toFixed(0)}cm`}`
+                            : "?"} · {Math.round(calibTarget.confidence * 100)}%
+                        </p>
+                      </div>
+                    )}
+                    {!calibTarget && yoloDetections.length > 0 && (
+                      <p className="text-[9px] text-yellow-400 mb-2">
+                        Klik objek di video untuk memilih
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <input
+                        type="number" step="0.1" min="0.1" max="20"
+                        value={calibDist}
+                        onChange={(e) => setCalibDist(e.target.value)}
+                        placeholder="meter"
+                        className="flex-1 px-2 py-1.5 bg-zinc-800/40 rounded-lg border border-zinc-700/30 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-cyan-500/30"
+                      />
+                      <button
+                        onClick={handleCalibrate}
+                        disabled={!calibDist || !calibTarget}
+                        className="px-3 py-1.5 bg-cyan-600/60 rounded-lg text-xs font-medium text-cyan-300 hover:bg-cyan-600/80 disabled:opacity-40 transition-colors"
+                      >
+                        Set
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
