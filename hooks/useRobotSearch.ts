@@ -88,11 +88,15 @@ export function useRobotSearch({ detections, onMotors, onBuzzer, enabled = false
 
     const person = detections.find(d => d.label === "person" && d.confidence > 0.5);
     if (!person) {
-      setState("searching");
-      targetRef.current = null;
-      onBuzzer?.("lost");
-      spinCycle();
-      return;
+      const t = setTimeout(() => {
+        const stillLost = !detections.find(d => d.label === "person" && d.confidence > 0.5);
+        if (!stillLost) return;
+        setState("searching");
+        targetRef.current = null;
+        onBuzzer?.("lost");
+        spinCycle();
+      }, 2000);
+      return () => clearTimeout(t);
     }
 
     targetRef.current = person;

@@ -7,6 +7,7 @@ export function useSearchVoice() {
   const prevStateRef = useRef<"idle" | "searching" | "locked" | "resting">("idle");
   const talkingRef = useRef(false);
   const keyRef = useRef("");
+  const lastTriggerRef = useRef(0);
 
   const getKey = useCallback(() => {
     if (keyRef.current) return keyRef.current;
@@ -55,6 +56,9 @@ export function useSearchVoice() {
   }, [getKey]);
 
   const trigger = useCallback(async ({ searchState, onSpeak, skipSpeak }: { searchState: "idle" | "searching" | "locked" | "resting"; onSpeak?: (text: string) => void; skipSpeak?: boolean }) => {
+    const now = Date.now();
+    if (now - lastTriggerRef.current < 3000) { prevStateRef.current = searchState; return; }
+    lastTriggerRef.current = now;
     if (talkingRef.current) return;
     const prev = prevStateRef.current;
     prevStateRef.current = searchState;
