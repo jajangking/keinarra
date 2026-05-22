@@ -24,6 +24,81 @@ interface ESP32ControlProps {
   onDisconnect?: () => void;
 }
 
+// Module-level — survives component unmount/remount
+let persistentWs: WebSocket | null = null;
+let persistentReconnectTimer = 0;
+let persistentReconnectAttempt = 0;
+let persistentConnected = false;
+let persistentIp = "";
+let persistentWsUrl = "";
+let persistentCallbacks: {
+  onOpen?: () => void;
+  onClose?: () => void;
+  onMsg?: (msg: string) => void;
+  onError?: () => void;
+} = {};
+
+function persistentConnect(url: string) {
+  if (persistentWs && persistentWs.readyState === WebSocket.OPEN) return;
+
+  persistentWsUrl = url;
+  if (persistentWs) {
+    persistentWs.onclose = null;
+    persistentWs.onerror = null;
+    persistentWs.close();
+  }
+
+  const ws = new WebSocket(url);
+  persistentWs = ws;
+
+  ws.onopen = () => {
+    persistentConnected = true;
+    persistentReconnectAttempt = 0;
+    persistentCallbacks.onOpen?.();
+  };
+
+  ws.onmessage = (e) => {
+    persistentCallbacks.onMsg?.(e.data as string);
+  };
+
+  ws.onerror = () => {
+    persistentCallbacks.onError?.();
+  };
+
+  ws.onclose = () => {
+    if (persistentWs === ws) {
+      persistentWs = null;
+      persistentConnected = false;
+      persistentCallbacks.onClose?.();
+
+      if (persistentReconnectAttempt < 5 && persistentIp) {
+        const delay = Math.min(1000 * Math.pow(2, persistentReconnectAttempt), 8000);
+        persistentReconnectAttempt++;
+        persistentReconnectTimer = window.setTimeout(() => {
+          if (!persistentConnected) persistentConnect(persistentWsUrl);
+        }, delay);
+      }
+    }
+  };
+}
+
+function persistentDisconnect() {
+  clearTimeout(persistentReconnectTimer);
+  if (persistentWs) {
+    persistentWs.onclose = null;
+    persistentWs.onerror = null;
+    persistentWs.close();
+    persistentWs = null;
+  }
+  persistentConnected = false;
+}
+
+function persistentSend(cmd: string) {
+  if (persistentWs?.readyState === WebSocket.OPEN) {
+    persistentWs.send(cmd);
+  }
+}
+
 export function ESP32Control({ 
   leftSpeed: externalLeft,
   rightSpeed: externalRight,
@@ -32,36 +107,52 @@ export function ESP32Control({
   detections = [],
   onMotors, onBuzzer, onConnect, onDisconnect 
 }: ESP32ControlProps) {
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(persistentConnected);
   const [log, setLog] = useState<string[]>([]);
   const [ip, setIp] = useState(() => {
     if (typeof window === "undefined") return "";
     try { return localStorage.getItem("esp32_ip") ?? ""; } catch { return ""; }
   });
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef(0);
-  const reconnectAttemptRef = useRef(0);
   const lastSentMotorsRef = useRef({ l: 0, r: 0 });
-  const connectedRef = useRef(false);
-  const ipRef = useRef("");
 
   const addLog = useCallback((msg: string) => {
     setLog(prev => [msg, ...prev].slice(0, 50));
   }, []);
 
-  // Keep refs in sync
-  useEffect(() => { connectedRef.current = connected; }, [connected]);
-  useEffect(() => { ipRef.current = ip; }, [ip]);
   useEffect(() => {
     try { localStorage.setItem("esp32_ip", ip); } catch {}
+    if (ip) persistentIp = ip;
   }, [ip]);
+
+  // Hook into persistent WebSocket callbacks
+  useEffect(() => {
+    persistentCallbacks = {
+      onOpen: () => {
+        addLog(">> ESP32 TERHUBUNG");
+        setConnected(true);
+        onConnect?.();
+      },
+      onClose: () => {
+        addLog(">> ESP32 TERPUTUS");
+        setConnected(false);
+        if (persistentReconnectAttempt >= 5 || !persistentIp) {
+          addLog(">> GAGAL SAMBUNG, tekan ON buat manual");
+          onDisconnect?.();
+        }
+      },
+      onError: () => {
+        addLog(">> GAGAL TERHUBUNG");
+      },
+      onMsg: (msg: string) => {
+        addLog(">> " + msg);
+      },
+    };
+  }, [addLog, onConnect, onDisconnect]);
 
   const wsSend = useCallback((cmd: string) => {
     addLog(cmd);
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(cmd);
-    }
+    persistentSend(cmd);
   }, [addLog]);
 
   const sendMotors = useCallback((l: number, r: number) => {
@@ -76,66 +167,30 @@ export function ESP32Control({
     if (!ip.trim()) { addLog(">> Masukkan IP ESP32"); return; }
     const url = `ws://${ip.trim()}:81/`;
     addLog(`>> MENYAMBUNG ${url}`);
+    persistentIp = ip.trim();
+    persistentReconnectAttempt = 0;
+    persistentConnect(url);
+  }, [ip, addLog]);
 
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.onerror = null;
-      wsRef.current.close();
+  const buzRef = useRef(false);
+  const toggleBuzzer = useCallback(() => {
+    if (buzRef.current) {
+      wsSend("<< BUZZER:OFF");
+      onBuzzer?.("off");
+    } else {
+      wsSend("<< BUZZER:ON:FREQ=800");
+      onBuzzer?.("chirp");
     }
+  }, [wsSend, onBuzzer]);
 
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
+  const disconnect = useCallback(() => {
+    persistentDisconnect();
+    setConnected(false);
+    addLog(">> ESP32 DIPUTUSKAN");
+    onDisconnect?.();
+  }, [addLog, onDisconnect]);
 
-    ws.onopen = () => {
-      addLog(">> ESP32 TERHUBUNG");
-      setConnected(true);
-      connectedRef.current = true;
-      reconnectAttemptRef.current = 0;
-      onConnect?.();
-    };
-
-    ws.onmessage = (e) => {
-      const msg = e.data as string;
-      addLog(">> " + msg);
-    };
-
-    ws.onerror = () => {
-      addLog(">> GAGAL TERHUBUNG");
-    };
-
-    ws.onclose = () => {
-      if (wsRef.current === ws) {
-        wsRef.current = null;
-        setConnected(false);
-        connectedRef.current = false;
-        addLog(">> ESP32 TERPUTUS");
-
-        const attempt = reconnectAttemptRef.current;
-        if (attempt < 5 && ipRef.current.trim()) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
-          addLog(`>> COBA ULANG ${attempt + 1}/5 dalam ${delay / 1000}s...`);
-          reconnectAttemptRef.current = attempt + 1;
-          reconnectTimerRef.current = window.setTimeout(() => {
-            if (!connectedRef.current) connect();
-          }, delay);
-        } else {
-          addLog(">> GAGAL SAMBUNG, tekan ON buat manual");
-          onDisconnect?.();
-        }
-      }
-    };
-  }, [ip, addLog, onConnect, onDisconnect]);
-
-  useEffect(() => {
-    return () => {
-      clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.close();
-      }
-    };
-  }, []);
+  // No cleanup that closes WS — persistent module-level vars handle lifecycle
 
   // Forward external motor changes to WebSocket
   useEffect(() => {
@@ -148,32 +203,12 @@ export function ESP32Control({
   const l = externalLeft ?? 0;
   const r = externalRight ?? 0;
   const buz = externalBuzzer ?? false;
-
-  // Buzzer local state for manual toggle (independent of externalBuzzer prop)
-  const buzzerActiveRef = useRef(false);
-
-  const toggleBuzzer = useCallback(() => {
-    if (buzzerActiveRef.current) {
-      wsSend("<< BUZZER:OFF");
-      buzzerActiveRef.current = false;
-      onBuzzer?.("off");
-    } else {
-      wsSend("<< BUZZER:ON:FREQ=800");
-      buzzerActiveRef.current = true;
-      onBuzzer?.("chirp");
-    }
-  }, [wsSend, onBuzzer]);
+  buzRef.current = buz;
 
   // Forward external buzzer changes to WebSocket
   useEffect(() => {
     if (!connected) return;
-    if (buz) {
-      wsSend("<< BUZZER:ON:FREQ=800");
-      buzzerActiveRef.current = true;
-    } else {
-      wsSend("<< BUZZER:OFF");
-      buzzerActiveRef.current = false;
-    }
+    wsSend(buz ? "<< BUZZER:ON:FREQ=800" : "<< BUZZER:OFF");
   }, [buz, connected, wsSend]);
 
   const currentSpeedRef = useRef({ l: 0, r: 0 });
@@ -185,7 +220,7 @@ export function ESP32Control({
     let active = false;
 
     const loop = () => {
-      if (!connectedRef.current) { anim = requestAnimationFrame(loop); return; }
+      if (!persistentConnected) { anim = requestAnimationFrame(loop); return; }
 
       if (keys.size === 0) {
         if (active) {
@@ -245,19 +280,6 @@ export function ESP32Control({
     };
   }, [connected, sendMotors, toggleBuzzer, onMotors]);
 
-  const disconnect = useCallback(() => {
-    clearTimeout(reconnectTimerRef.current);
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    setConnected(false);
-    connectedRef.current = false;
-    addLog(">> ESP32 DIPUTUSKAN");
-    onDisconnect?.();
-  }, [addLog, onDisconnect]);
-
   return (
     <div className="bg-zinc-900/90 backdrop-blur-md rounded-xl border border-zinc-800/50 overflow-hidden shadow-xl" style={{ width: 240 }}>
       {/* Header */}
@@ -307,7 +329,7 @@ export function ESP32Control({
       {/* Buttons */}
       <div className="grid grid-cols-3 gap-1 px-3 pb-2">
         <button disabled={!connected} onTouchStart={() => sendMotors(255, 255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
-        <button disabled={!connected} onClick={toggleBuzzer} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buzzerActiveRef.current ? "🔊" : "🔇"}</button>
+        <button disabled={!connected} onClick={toggleBuzzer} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
         <button disabled={!connected} onTouchStart={() => sendMotors(-255, -255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
         <button disabled={!connected} onTouchStart={() => sendMotors(-200, 200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
         <button disabled={!connected} onClick={() => sendMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>
