@@ -11,7 +11,7 @@ type MqttOptions = {
   reconnectPeriod?: number;
 };
 
-const DEFAULT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
+const DEFAULT_BROKER = "wss://1303127e3fac47ce811384c183c0f735.s1.eu.hivemq.cloud:8884/mqtt";
 const BROKER_STORAGE_KEY = "mqtt_broker";
 
 const TOPICS = {
@@ -29,12 +29,17 @@ let persistentCallbacks: {
   onMessage?: (topic: string, payload: string) => void;
 } = {};
 
+const DEFAULT_USERNAME = "keinarra";
+const DEFAULT_PASSWORD = "Keinarra123";
+
 export function useMQTT() {
   const [connected, setConnected] = useState(persistentConnected);
   const [broker, setBroker] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_BROKER;
     try { return localStorage.getItem(BROKER_STORAGE_KEY) ?? DEFAULT_BROKER; } catch { return DEFAULT_BROKER; }
   });
+  const [mqttUser, setMqttUser] = useState(DEFAULT_USERNAME);
+  const [mqttPass, setMqttPass] = useState(DEFAULT_PASSWORD);
   const callbacksRef = useRef(persistentCallbacks);
 
   useEffect(() => {
@@ -45,7 +50,7 @@ export function useMQTT() {
     try { localStorage.setItem(BROKER_STORAGE_KEY, broker); } catch {}
   }, [broker]);
 
-  const connect = useCallback((url?: string) => {
+  const connect = useCallback((url?: string, username?: string, password?: string) => {
     const u = (url || broker).trim();
     if (!u) return;
     if (persistentClient && persistentConnected) return;
@@ -57,6 +62,8 @@ export function useMQTT() {
     }
 
     const client = mqtt.connect(u, {
+      username: username || mqttUser,
+      password: password || mqttPass,
       reconnectPeriod: 5000,
       connectTimeout: 10000,
       clean: true,
@@ -118,6 +125,10 @@ export function useMQTT() {
     connected,
     broker,
     setBroker,
+    mqttUser,
+    setMqttUser,
+    mqttPass,
+    setMqttPass,
     connect,
     disconnect,
     publish,

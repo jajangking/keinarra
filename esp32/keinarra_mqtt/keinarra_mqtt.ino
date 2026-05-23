@@ -2,8 +2,8 @@
  * KEINARRA — ESP32 MQTT Robot Controller
  *
  * Flow:
- *   Next.js (browser) → MQTT over WebSocket → broker.hivemq.com:8884
- *   ESP32             → MQTT over TCP        → broker.hivemq.com:1883
+ *   Next.js (browser) → MQTT over WebSocket → HiveMQ Cloud (8884)
+ *   ESP32             → MQTT over TCP        → HiveMQ Cloud (1883)
  *
  * Subscribe topics:
  *   keinarra/esp32/motor   — JSON {"left":<int>,"right":<int>}  (-255..255)
@@ -21,9 +21,11 @@ const char* WIFI_SSID     = "your-ssid";
 const char* WIFI_PASSWORD = "your-password";
 
 // ── MQTT ─────────────────────────────────────────────────────────────────
-const char* MQTT_BROKER   = "broker.hivemq.com";
+const char* MQTT_BROKER   = "1303127e3fac47ce811384c183c0f735.s1.eu.hivemq.cloud";
 const int   MQTT_PORT     = 1883;
 const char* MQTT_CLIENT_ID = "keinarra-esp32";
+const char* MQTT_USER     = "keinarra";
+const char* MQTT_PASS     = "Keinarra123";
 
 const char* TOPIC_MOTOR   = "keinarra/esp32/motor";
 const char* TOPIC_BUZZER  = "keinarra/esp32/buzzer";
@@ -111,7 +113,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 void reconnectMQTT() {
   while (!mqttClient.connected()) {
     Serial.print("MQTT connecting...");
-    if (mqttClient.connect(MQTT_CLIENT_ID)) {
+    if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)) {
       Serial.println(" connected");
       mqttClient.subscribe(TOPIC_MOTOR);
       mqttClient.subscribe(TOPIC_BUZZER);

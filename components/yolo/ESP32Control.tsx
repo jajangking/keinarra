@@ -41,7 +41,7 @@ export function ESP32Control({
   useEffect(() => {
     if (mqtt.broker) {
       setBrokerInput(mqtt.broker);
-      if (!mqtt.connected) mqtt.connect(mqtt.broker);
+      if (!mqtt.connected) mqtt.connect(mqtt.broker, mqtt.mqttUser, mqtt.mqttPass);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -82,7 +82,7 @@ export function ESP32Control({
     const url = brokerInput.trim().startsWith("ws") ? brokerInput.trim() : `ws://${brokerInput.trim()}`;
     addLog(`>> MENYAMBUNG ${url}`);
     mqtt.setBroker(url);
-    mqtt.connect(url);
+    mqtt.connect(url, mqtt.mqttUser, mqtt.mqttPass);
   }, [brokerInput, addLog, mqtt]);
 
   const toggleBuzzer = useCallback(() => {
