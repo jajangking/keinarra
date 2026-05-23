@@ -55,9 +55,16 @@ interface CameraViewProps {
   onDetections?: (dets: Detection[]) => void;
   onReady?: (ready: boolean) => void;
   onFps?: (fps: number) => void;
+  lockedId?: string | null;
+  onLock?: (id: string | null) => void;
+  customDrawMode?: boolean;
+  customBox?: { x: number; y: number; w: number; h: number } | null;
+  onCustomBox?: (box: { x: number; y: number; w: number; h: number } | null) => void;
+  onCustomTracking?: (det: { x: number; y: number; w: number; h: number; confidence: number } | null) => void;
+  hideYolo?: boolean;
 }
 
-export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
+export function CameraView({ onDetections, onReady, onFps, lockedId, onLock, customDrawMode, customBox, onCustomBox, onCustomTracking, hideYolo }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -65,9 +72,21 @@ export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
   const nextIdRef = useRef(1);
   const frameRef = useRef<ImageData | null>(null);
   const detectionsRef = useRef<Detection[]>([]);
+  const cameraRef = useRef<HTMLDivElement>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [yoloReady, setYoloReady] = useState(false);
   const [boxes, setBoxes] = useState<Detection[]>([]);
+  const drawStartRef = useRef<{ x: number; y: number } | null>(null);
+  const drawRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [drawingRect, setDrawingRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [trackedBox, setTrackedBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // Template matching for custom tracking
+  const customTemplateRef = useRef<Float32Array | null>(null);
+  const customTemplateWRef = useRef(0);
+  const customTemplateHRef = useRef(0);
+  const customTrackPosRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const customBoxIdRef = useRef(0);
+  const prevCustomBoxRef = useRef<typeof customBox>(null);
 
   // Init YOLO
   useEffect(() => {
@@ -172,6 +191,64 @@ export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
     animRef.current = requestAnimationFrame(processFrame);
   }, [onFps]);
 
+  const smoothPosRef = useRef<{ x: number; y: number } | null>(null);
+
+  const runTemplateMatch = useCallback(() => {
+    const tpl = customTemplateRef.current;
+    const lastPos = customTrackPosRef.current;
+    const frame = frameRef.current;
+    if (!tpl || !lastPos || !frame || !onCustomTracking) return;
+    const stride = 2;
+    const tw = customTemplateWRef.current;
+    const th = customTemplateHRef.current;
+    const tplData = tpl;
+    const frameData = frame.data;
+    const searchR = 40;
+    const step = 2;
+    let bestScore = Infinity;
+    let bestX = lastPos.x;
+    let bestY = lastPos.y;
+    const sx = Math.max(0, lastPos.x - searchR);
+    const sy = Math.max(0, lastPos.y - searchR);
+    const ex = Math.min(W - tw * stride, lastPos.x + searchR);
+    const ey = Math.min(H - th * stride, lastPos.y + searchR);
+    for (let y = sy; y <= ey; y += step) {
+      for (let x = sx; x <= ex; x += step) {
+        let score = 0;
+        for (let ty = 0; ty < th && score < bestScore; ty++) {
+          for (let tx = 0; tx < tw && score < bestScore; tx++) {
+            const fi = ((y + ty * stride) * W + (x + tx * stride)) * 4;
+            const ti = (ty * tw + tx) * 3;
+            score += Math.abs(frameData[fi] - tplData[ti]);
+            score += Math.abs(frameData[fi + 1] - tplData[ti + 1]);
+            score += Math.abs(frameData[fi + 2] - tplData[ti + 2]);
+          }
+        }
+        if (score < bestScore) {
+          bestScore = score;
+          bestX = x;
+          bestY = y;
+        }
+      }
+    }
+    // Init or update smooth position
+    if (!smoothPosRef.current) {
+      smoothPosRef.current = { x: bestX, y: bestY };
+    }
+    const smoothFactor = 0.5;
+    smoothPosRef.current.x += (bestX - smoothPosRef.current.x) * smoothFactor;
+    smoothPosRef.current.y += (bestY - smoothPosRef.current.y) * smoothFactor;
+    customTrackPosRef.current = { x: smoothPosRef.current.x, y: smoothPosRef.current.y, w: lastPos.w, h: lastPos.h };
+    const trackedPct = {
+      x: (smoothPosRef.current.x / W) * 100,
+      y: (smoothPosRef.current.y / H) * 100,
+      w: (lastPos.w / W) * 100,
+      h: (lastPos.h / H) * 100,
+    };
+    setTrackedBox(trackedPct);
+    onCustomTracking({ ...trackedPct, confidence: Math.max(0, 1 - bestScore / (tw * th * 3 * 255)) });
+  }, [onCustomTracking]);
+
   const runDetection = useCallback(async () => {
     if (!detectorRef.current || !frameRef.current) {
       detTimerRef.current = window.setTimeout(runDetection, 100);
@@ -186,10 +263,12 @@ export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
       }));
       setBoxes(mapped);
       detectionsRef.current = mapped;
+      // Run template matching for custom tracking
+      runTemplateMatch();
       onDetections?.(mapped);
     } catch {}
     detTimerRef.current = window.setTimeout(runDetection, 100);
-  }, [onDetections]);
+  }, [onDetections, runTemplateMatch]);
 
   useEffect(() => {
     if (isRunning && yoloReady) {
@@ -204,8 +283,93 @@ export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
     };
   }, [isRunning, yoloReady, processFrame, runDetection]);
 
+  // Custom drawing handlers (use refs to avoid async state issues)
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (!customDrawMode || !cameraRef.current) return;
+    const rect = cameraRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const r = { x, y, w: 0, h: 0 };
+    drawStartRef.current = { x, y };
+    drawRectRef.current = r;
+    setDrawingRect(r);
+  }, [customDrawMode]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!customDrawMode || !drawStartRef.current || !cameraRef.current) return;
+    const rect = cameraRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const start = drawStartRef.current;
+    const r = {
+      x: Math.min(start.x, x),
+      y: Math.min(start.y, y),
+      w: Math.abs(x - start.x),
+      h: Math.abs(y - start.y),
+    };
+    drawRectRef.current = r;
+    setDrawingRect(r);
+  }, [customDrawMode]);
+
+  const handlePointerUp = useCallback(() => {
+    if (!customDrawMode || !drawStartRef.current || !onCustomBox) return;
+    drawStartRef.current = null;
+    const r = drawRectRef.current;
+    drawRectRef.current = null;
+    if (!r || (r.w < 2 && r.h < 2)) {
+      setDrawingRect(null);
+      return;
+    }
+    onCustomBox(r);
+    setDrawingRect(null);
+  }, [customDrawMode, onCustomBox]);
+
+  // Capture template when custom box is drawn or changes
+  useEffect(() => {
+    if (!customBox) {
+      customTemplateRef.current = null;
+      customTrackPosRef.current = null;
+      setTrackedBox(null);
+      prevCustomBoxRef.current = null;
+      smoothPosRef.current = null;
+      onCustomTracking?.(null);
+      return;
+    }
+    // Skip if same box as before (no change)
+    if (prevCustomBoxRef.current && prevCustomBoxRef.current.x === customBox.x && prevCustomBoxRef.current.y === customBox.y && prevCustomBoxRef.current.w === customBox.w && prevCustomBoxRef.current.h === customBox.h) {
+      return;
+    }
+    prevCustomBoxRef.current = customBox;
+    const frame = frameRef.current;
+    if (!frame || !isRunning) return;
+    const px = Math.max(0, Math.round((customBox.x / 100) * W));
+    const py = Math.max(0, Math.round((customBox.y / 100) * H));
+    const pw = Math.max(4, Math.round((customBox.w / 100) * W));
+    const ph = Math.max(4, Math.round((customBox.h / 100) * H));
+    const stride = 2;
+    const tw = Math.max(2, Math.floor(pw / stride));
+    const th = Math.max(2, Math.floor(ph / stride));
+    const tpl = new Float32Array(tw * th * 3);
+    const data = frame.data;
+    for (let ty = 0; ty < th; ty++) {
+      for (let tx = 0; tx < tw; tx++) {
+        const fi = ((py + ty * stride) * W + (px + tx * stride)) * 4;
+        const ti = (ty * tw + tx) * 3;
+        tpl[ti] = data[fi];
+        tpl[ti + 1] = data[fi + 1];
+        tpl[ti + 2] = data[fi + 2];
+      }
+    }
+    customTemplateRef.current = tpl;
+    customTemplateWRef.current = tw;
+    customTemplateHRef.current = th;
+    customTrackPosRef.current = { x: px, y: py, w: pw, h: ph };
+    smoothPosRef.current = null;
+    customBoxIdRef.current++;
+  }, [customBox, isRunning]);
+
   return (
-    <div className="absolute inset-0 bg-black">
+    <div ref={cameraRef} className="absolute inset-0 bg-black">
       <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" playsInline />
       <canvas ref={canvasRef} className="hidden" />
       {!isRunning && (
@@ -213,21 +377,94 @@ export function CameraView({ onDetections, onReady, onFps }: CameraViewProps) {
           <p className="text-zinc-600 text-xs font-mono">[ START ]</p>
         </div>
       )}
-      {isRunning && boxes.map(d => {
+      {isRunning && !hideYolo && boxes.map(d => {
         const pctX = (d.x / W) * 100;
         const pctY = (d.y / H) * 100;
         const pctW = (d.w / W) * 100;
         const pctH = (d.h / H) * 100;
         const color = getColor(d.label);
+        const isLocked = lockedId === d.id;
         return (
-          <div key={d.id} className="absolute pointer-events-none" style={{ zIndex: 3, left: `${pctX}%`, top: `${pctY}%`, width: `${pctW}%`, height: `${pctH}%` }}>
-            <div className="absolute inset-0" style={{ border: `2px solid ${color}`, borderRadius: 2 }} />
-            <div className="absolute -top-4 left-0 px-1 rounded text-[9px] font-mono whitespace-nowrap" style={{ backgroundColor: color, color: "#000", lineHeight: "14px" }}>
+          <div
+            key={d.id}
+            className="absolute"
+            style={{ zIndex: isLocked ? 5 : 3, left: `${pctX}%`, top: `${pctY}%`, width: `${pctW}%`, height: `${pctH}%` }}
+            onClick={() => onLock?.(isLocked ? null : d.id)}
+          >
+            <div
+              className="absolute inset-0 transition-all duration-200"
+              style={{
+                border: `${isLocked ? 3 : 2}px solid ${isLocked ? "#06b6d4" : color}`,
+                borderRadius: 2,
+                backgroundColor: isLocked ? "rgba(6, 182, 212, 0.12)" : "transparent",
+                boxShadow: isLocked ? "0 0 20px rgba(6, 182, 212, 0.5)" : undefined,
+              }}
+            />
+            <div
+              className="absolute -top-4 left-0 px-1 rounded text-[9px] font-mono whitespace-nowrap transition-all duration-200"
+              style={{
+                backgroundColor: isLocked ? "#06b6d4" : color,
+                color: "#000",
+                lineHeight: "14px",
+                boxShadow: isLocked ? "0 0 12px rgba(6, 182, 212, 0.6)" : undefined,
+              }}
+            >
               {d.label} {Math.round(d.confidence * 100)}%
+              {isLocked ? " 🔒" : ""}
             </div>
+            {isLocked && (
+              <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[9px] font-mono text-cyan-400 animate-pulse whitespace-nowrap pointer-events-none">
+                LOCKED
+              </div>
+            )}
           </div>
         );
       })}
+
+      {/* Drawing overlay */}
+      {customDrawMode && (
+        <div
+          className="absolute inset-0 touch-none"
+          style={{ zIndex: 7, cursor: "crosshair" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+        />
+      )}
+      {drawingRect && (
+        <div
+          className="absolute pointer-events-none"
+          style={{
+            zIndex: 8,
+            left: `${drawingRect.x}%`,
+            top: `${drawingRect.y}%`,
+            width: `${drawingRect.w}%`,
+            height: `${drawingRect.h}%`,
+            border: "2px dashed #fbbf24",
+            backgroundColor: "rgba(251, 191, 36, 0.1)",
+          }}
+        />
+      )}
+      {(trackedBox || customBox) && (
+        <div
+          className="absolute pointer-events-none"
+          style={{
+            zIndex: 4,
+            left: `${(trackedBox || customBox)!.x}%`,
+            top: `${(trackedBox || customBox)!.y}%`,
+            width: `${(trackedBox || customBox)!.w}%`,
+            height: `${(trackedBox || customBox)!.h}%`,
+            border: "2px solid #f59e0b",
+            backgroundColor: "rgba(245, 158, 11, 0.08)",
+            boxShadow: "0 0 12px rgba(245, 158, 11, 0.3)",
+          }}
+        >
+          <div className="absolute -top-4 left-0 px-1 rounded text-[9px] font-mono whitespace-nowrap bg-amber-500 text-black leading-[14px]">
+            CUSTOM {trackedBox ? "🎯" : ""}
+          </div>
+        </div>
+      )}
 
       {/* Start/Stop button overlay */}
       <div className="absolute top-2 right-2" style={{ zIndex: 6 }}>

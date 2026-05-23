@@ -31,6 +31,13 @@ export default function YoloPage() {
   const [buzzerOn, setBuzzerOn] = useState(false);
   const [sttEnabled, setSttEnabled] = useState(true);
   const [voiceLog, setVoiceLog] = useState<{ role: "assistant"; text: string }[]>([]);
+  const [lockedId, setLockedId] = useState<string | null>(null);
+  const [customTrackMode, setCustomTrackMode] = useState(false);
+  const [customDrawMode, setCustomDrawMode] = useState(false);
+  const [customBox, setCustomBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [customTracking, setCustomTracking] = useState<{ x: number; y: number; w: number; h: number; confidence: number } | null>(null);
+  const [customOnly, setCustomOnly] = useState(false);
+  const customPanelRef = useRef<HTMLDivElement>(null);
 
   const audio = useAudioManager();
   const { buzzerStart, buzzerStop, setCanPlay } = useBuzzerSound();
@@ -73,8 +80,13 @@ export default function YoloPage() {
     setTimeout(() => setBuzzerOn(false), 1200);
   }, [buzzerStart]);
 
+  // Merge custom tracking with YOLO detections for robot search
+  const mergedDets = customTracking && customTracking.confidence > 0.15
+    ? [...(customOnly ? [] : dets), { id: "custom", label: "person", confidence: Math.max(0.5, customTracking.confidence), x: (customTracking.x / 100) * 640, y: (customTracking.y / 100) * 480, w: (customTracking.w / 100) * 640, h: (customTracking.h / 100) * 480 }]
+    : (customOnly ? [] : dets);
+
   const { state: searchState } = useRobotSearch({
-    detections: dets,
+    detections: mergedDets,
     onMotors: handleMotors,
     enabled: searchMode,
   });
@@ -168,7 +180,16 @@ export default function YoloPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sttEnabled]);
 
-  const persons = dets.filter(d => d.label === "person");
+  const handleCustomBox = useCallback((box: { x: number; y: number; w: number; h: number } | null) => {
+    setCustomBox(box);
+    if (box) setCustomDrawMode(false);
+  }, []);
+
+  const handleCustomTracking = useCallback((det: { x: number; y: number; w: number; h: number; confidence: number } | null) => {
+    setCustomTracking(det);
+  }, []);
+
+  const persons = mergedDets.filter(d => d.label === "person");
 
   const stateColor = searchState === "searching" ? "text-yellow-400" 
     : searchState === "locked" ? "text-green-400" 
@@ -220,6 +241,16 @@ export default function YoloPage() {
             <span className={`w-1.5 h-1.5 rounded-full ${motorL !== 0 || motorR !== 0 ? "bg-green-400 animate-pulse" : "bg-green-400"}`} />
             ESP
           </button>
+          <button
+            onClick={() => { setCustomTrackMode(prev => !prev); setCustomDrawMode(false); }}
+            className={`px-2 py-1 rounded text-[9px] font-medium transition-colors ${
+              customTrackMode
+                ? "bg-amber-600/40 text-amber-400"
+                : "bg-zinc-800/80 hover:bg-zinc-700/80 text-amber-400"
+            }`}
+          >
+            CUSTOM
+          </button>
         </div>
 
         <div ref={panelRef} className={`absolute top-full right-2 mt-1 transition-opacity duration-150 ${showESP ? "opacity-100" : "opacity-0 pointer-events-none"}`} style={{ zIndex: 20 }}>
@@ -233,12 +264,58 @@ export default function YoloPage() {
             onBuzzer={(p) => setBuzzerOn(p !== "off")}
           />
         </div>
+
+        {/* Custom Track Panel */}
+        <div ref={customPanelRef} className={`absolute top-full right-2 mt-1 transition-opacity duration-150 ${customTrackMode ? "opacity-100" : "opacity-0 pointer-events-none"}`} style={{ zIndex: 20 }}>
+          <div className="bg-zinc-900 border border-zinc-700/60 rounded-lg p-3 w-52 shadow-2xl">
+            <p className="text-[10px] font-bold text-amber-400 mb-2 tracking-wide">CUSTOM TRACK</p>
+            <div className="space-y-2">
+              <button
+                onClick={() => setCustomDrawMode(prev => !prev)}
+                className={`w-full px-2 py-1.5 rounded text-[10px] font-medium transition-colors ${
+                  customDrawMode
+                    ? "bg-amber-500/30 text-amber-300 border border-amber-500/50"
+                    : "bg-zinc-800/80 hover:bg-zinc-700/80 text-zinc-300"
+                }`}
+              >
+                {customDrawMode ? "GAMBAR BOX..." : "GAMBAR BOX"}
+              </button>
+              {customBox && (
+                <div className="bg-zinc-800/60 rounded p-1.5 space-y-1">
+                  <p className="text-[9px] font-mono text-amber-300/80">
+                    Box: ({customBox.x.toFixed(0)},{customBox.y.toFixed(0)}) {customBox.w.toFixed(0)}×{customBox.h.toFixed(0)}
+                  </p>
+                  <button
+                    onClick={() => { setCustomBox(null); setCustomDrawMode(false); setCustomTracking(null); }}
+                    className="w-full px-2 py-1 rounded text-[9px] bg-red-600/30 hover:bg-red-600/50 text-red-400 transition-colors"
+                  >
+                    HAPUS
+                  </button>
+                </div>
+              )}
+              {!customBox && (
+                <p className="text-[9px] text-zinc-500 text-center py-1">
+                  {customDrawMode ? "Tarik box di kamera" : "Klik GAMBAR BOX lalu tarik di kamera"}
+                </p>
+              )}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={customOnly}
+                  onChange={() => setCustomOnly(prev => !prev)}
+                  className="accent-amber-500 w-3 h-3"
+                />
+                <span className="text-[9px] text-zinc-400">Sembunyikan deteksi lain</span>
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Camera area */}
       <div className="flex-1 relative bg-black min-h-0 flex flex-col">
         <div className="flex-1 relative min-h-0">
-          <CameraView onDetections={handleDetections} onFps={setYoloFps} />
+          <CameraView onDetections={handleDetections} onFps={setYoloFps} lockedId={lockedId} onLock={setLockedId} customDrawMode={customDrawMode} customBox={customBox} onCustomBox={handleCustomBox} onCustomTracking={handleCustomTracking} hideYolo={customOnly} />
 
           {searchMode && (
             <div className="absolute top-2 left-2 flex items-center gap-1.5" style={{ zIndex: 7 }}>
