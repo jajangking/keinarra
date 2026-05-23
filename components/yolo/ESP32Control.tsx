@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Robot3D } from "@/components/yolo/Robot3D";
+import { useMQTT } from "@/hooks/useMQTT";
 
 interface Detection {
   label: string;
@@ -24,94 +25,19 @@ interface ESP32ControlProps {
   onDisconnect?: () => void;
 }
 
-// Module-level — survives component unmount/remount
-let persistentWs: WebSocket | null = null;
-let persistentReconnectTimer = 0;
-let persistentReconnectAttempt = 0;
-let persistentConnected = false;
-let persistentIp = "";
-let persistentWsUrl = "";
-let persistentCallbacks: {
-  onOpen?: () => void;
-  onClose?: () => void;
-  onMsg?: (msg: string) => void;
-  onError?: () => void;
-} = {};
-
-function persistentConnect(url: string) {
-  if (persistentWs && persistentWs.readyState === WebSocket.OPEN) return;
-
-  persistentWsUrl = url;
-  if (persistentWs) {
-    persistentWs.onclose = null;
-    persistentWs.onerror = null;
-    persistentWs.close();
-  }
-
-  const ws = new WebSocket(url);
-  persistentWs = ws;
-
-  ws.onopen = () => {
-    persistentConnected = true;
-    persistentReconnectAttempt = 0;
-    persistentCallbacks.onOpen?.();
-  };
-
-  ws.onmessage = (e) => {
-    persistentCallbacks.onMsg?.(e.data as string);
-  };
-
-  ws.onerror = () => {
-    persistentCallbacks.onError?.();
-  };
-
-  ws.onclose = () => {
-    if (persistentWs === ws) {
-      persistentWs = null;
-      persistentConnected = false;
-      persistentCallbacks.onClose?.();
-
-      if (persistentReconnectAttempt < 5 && persistentIp) {
-        const delay = Math.min(1000 * Math.pow(2, persistentReconnectAttempt), 8000);
-        persistentReconnectAttempt++;
-        persistentReconnectTimer = window.setTimeout(() => {
-          if (!persistentConnected) persistentConnect(persistentWsUrl);
-        }, delay);
-      }
-    }
-  };
-}
-
-function persistentDisconnect() {
-  clearTimeout(persistentReconnectTimer);
-  if (persistentWs) {
-    persistentWs.onclose = null;
-    persistentWs.onerror = null;
-    persistentWs.close();
-    persistentWs = null;
-  }
-  persistentConnected = false;
-}
-
-function persistentSend(cmd: string) {
-  if (persistentWs?.readyState === WebSocket.OPEN) {
-    persistentWs.send(cmd);
-  }
-}
-
-export function ESP32Control({ 
+export function ESP32Control({
   leftSpeed: externalLeft,
   rightSpeed: externalRight,
   buzzerOn: externalBuzzer,
   searchState = "idle" as "idle" | "searching" | "locked" | "resting",
   detections = [],
-  onMotors, onBuzzer, onConnect, onDisconnect 
+  onMotors, onBuzzer, onConnect, onDisconnect
 }: ESP32ControlProps) {
-  const [connected, setConnected] = useState(persistentConnected);
+  const mqtt = useMQTT();
   const [log, setLog] = useState<string[]>([]);
   const [ip, setIp] = useState(() => {
     if (typeof window === "undefined") return "";
-    try { return localStorage.getItem("esp32_ip") ?? ""; } catch { return ""; }
+    try { return localStorage.getItem("mqtt_broker") ?? ""; } catch { return ""; }
   });
 
   const lastSentMotorsRef = useRef({ l: 0, r: 0 });
@@ -121,95 +47,72 @@ export function ESP32Control({
   }, []);
 
   useEffect(() => {
-    try { localStorage.setItem("esp32_ip", ip); } catch {}
-    if (ip) persistentIp = ip;
-  }, [ip]);
-
-  // Hook into persistent WebSocket callbacks
-  useEffect(() => {
-    persistentCallbacks = {
-      onOpen: () => {
-        addLog(">> ESP32 TERHUBUNG");
-        setConnected(true);
+    mqtt.setCallbacks({
+      onConnect: () => {
+        addLog(">> MQTT TERHUBUNG");
         onConnect?.();
       },
-      onClose: () => {
-        addLog(">> ESP32 TERPUTUS");
-        setConnected(false);
-        if (persistentReconnectAttempt >= 5 || !persistentIp) {
-          addLog(">> GAGAL SAMBUNG, tekan ON buat manual");
-          onDisconnect?.();
-        }
+      onDisconnect: () => {
+        addLog(">> MQTT TERPUTUS");
+        onDisconnect?.();
       },
-      onError: () => {
-        addLog(">> GAGAL TERHUBUNG");
+      onMessage: (topic, payload) => {
+        addLog(`>> ${topic}: ${payload}`);
       },
-      onMsg: (msg: string) => {
-        addLog(">> " + msg);
-      },
-    };
-  }, [addLog, onConnect, onDisconnect]);
-
-  const wsSend = useCallback((cmd: string) => {
-    addLog(cmd);
-    persistentSend(cmd);
-  }, [addLog]);
+    });
+  }, [mqtt, addLog, onConnect, onDisconnect]);
 
   const sendMotors = useCallback((l: number, r: number) => {
     l = Math.max(-255, Math.min(255, Math.round(l)));
     r = Math.max(-255, Math.min(255, Math.round(r)));
     if (l === lastSentMotorsRef.current.l && r === lastSentMotorsRef.current.r) return;
     lastSentMotorsRef.current = { l, r };
-    wsSend(`<< MOTOR:${l},${r}`);
-  }, [wsSend]);
+    addLog(`<< MOTOR ${l},${r}`);
+    mqtt.sendMotors(l, r);
+  }, [mqtt, addLog]);
 
   const connect = useCallback(() => {
-    if (!ip.trim()) { addLog(">> Masukkan IP ESP32"); return; }
-    const url = `ws://${ip.trim()}:81/`;
+    if (!ip.trim()) { addLog(">> Masukkan alamat broker MQTT"); return; }
+    const url = ip.trim().startsWith("ws") ? ip.trim() : `ws://${ip.trim()}`;
     addLog(`>> MENYAMBUNG ${url}`);
-    persistentIp = ip.trim();
-    persistentReconnectAttempt = 0;
-    persistentConnect(url);
-  }, [ip, addLog]);
+    mqtt.setBroker(url);
+    mqtt.connect(url);
+  }, [ip, addLog, mqtt]);
 
-  const buzRef = useRef(false);
   const toggleBuzzer = useCallback(() => {
-    if (buzRef.current) {
-      wsSend("<< BUZZER:OFF");
-      onBuzzer?.("off");
-    } else {
-      wsSend("<< BUZZER:ON:FREQ=800");
-      onBuzzer?.("chirp");
-    }
-  }, [wsSend, onBuzzer]);
+    const pattern = buzRef.current ? "OFF" : "ON:FREQ=800";
+    mqtt.sendBuzzer(pattern);
+    addLog(`<< BUZZER ${pattern}`);
+    if (!buzRef.current) onBuzzer?.("chirp");
+    else onBuzzer?.("off");
+  }, [mqtt, addLog, onBuzzer]);
 
   const disconnect = useCallback(() => {
-    persistentDisconnect();
-    setConnected(false);
-    addLog(">> ESP32 DIPUTUSKAN");
+    mqtt.disconnect();
+    addLog(">> MQTT DIPUTUSKAN");
     onDisconnect?.();
-  }, [addLog, onDisconnect]);
+  }, [mqtt, addLog, onDisconnect]);
 
-  // No cleanup that closes WS — persistent module-level vars handle lifecycle
+  const buzRef = useRef(false);
 
-  // Forward external motor changes to WebSocket
+  // Forward external motor changes to MQTT
   useEffect(() => {
-    if (!connected) return;
+    if (!mqtt.connected) return;
     const l = externalLeft ?? 0;
     const r = externalRight ?? 0;
     sendMotors(l, r);
-  }, [externalLeft, externalRight, connected, sendMotors]);
+  }, [externalLeft, externalRight, mqtt.connected, sendMotors]);
 
   const l = externalLeft ?? 0;
   const r = externalRight ?? 0;
   const buz = externalBuzzer ?? false;
   buzRef.current = buz;
 
-  // Forward external buzzer changes to WebSocket
+  // Forward external buzzer changes to MQTT
   useEffect(() => {
-    if (!connected) return;
-    wsSend(buz ? "<< BUZZER:ON:FREQ=800" : "<< BUZZER:OFF");
-  }, [buz, connected, wsSend]);
+    if (!mqtt.connected) return;
+    mqtt.sendBuzzer(buz ? "ON:FREQ=800" : "OFF");
+  }, [buz, mqtt.connected, mqtt]);
 
   const currentSpeedRef = useRef({ l: 0, r: 0 });
   const keyTargetRef = useRef({ l: 0, r: 0 });
@@ -220,7 +123,7 @@ export function ESP32Control({
     let active = false;
 
     const loop = () => {
-      if (!persistentConnected) { anim = requestAnimationFrame(loop); return; }
+      if (!mqtt.connected) { anim = requestAnimationFrame(loop); return; }
 
       if (keys.size === 0) {
         if (active) {
@@ -278,39 +181,39 @@ export function ESP32Control({
       keys.clear();
       lastSentMotorsRef.current = { l: -999, r: -999 };
     };
-  }, [connected, sendMotors, toggleBuzzer, onMotors]);
+  }, [mqtt.connected, sendMotors, toggleBuzzer, onMotors]);
 
   return (
     <div className="bg-zinc-900/90 backdrop-blur-md rounded-xl border border-zinc-800/50 overflow-hidden shadow-xl" style={{ width: 240 }}>
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-800/50">
-        <span className="text-[10px] font-semibold text-zinc-400">ESP32</span>
+        <span className="text-[10px] font-semibold text-zinc-400">ESP32 · MQTT</span>
         <div className="flex items-center gap-1.5">
-          <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />
-          <span className={`text-[8px] font-mono ${connected ? "text-green-400" : "text-red-400"}`}>
-            {connected ? "ONLINE" : "OFFLINE"}
+          <span className={`w-1.5 h-1.5 rounded-full ${mqtt.connected ? "bg-green-400" : "bg-red-400"}`} />
+          <span className={`text-[8px] font-mono ${mqtt.connected ? "text-green-400" : "text-red-400"}`}>
+            {mqtt.connected ? "ONLINE" : "OFFLINE"}
           </span>
         </div>
       </div>
 
-      {/* IP input + connect */}
+      {/* Broker input + connect */}
       <div className="flex items-center gap-1 px-3 py-1.5 border-b border-zinc-800/30">
         <input
           value={ip}
           onChange={e => setIp(e.target.value)}
-          placeholder="192.168.x.x"
-          disabled={connected}
+          placeholder="192.168.x.x:9001"
+          disabled={mqtt.connected}
           className="flex-1 bg-zinc-800/60 border border-zinc-700/50 rounded px-1.5 py-1 text-[8px] font-mono text-zinc-300 placeholder-zinc-700 outline-none focus:border-cyan-700/50 transition-colors"
         />
         <button
-          onClick={connected ? disconnect : connect}
+          onClick={mqtt.connected ? disconnect : connect}
           className={`px-2 py-1 rounded text-[7px] font-medium transition-colors ${
-            connected
+            mqtt.connected
               ? "bg-red-600/30 text-red-400 hover:bg-red-600/40"
               : "bg-cyan-600/30 text-cyan-400 hover:bg-cyan-600/40"
           }`}
         >
-          {connected ? "OFF" : "ON"}
+          {mqtt.connected ? "OFF" : "ON"}
         </button>
       </div>
 
@@ -320,7 +223,7 @@ export function ESP32Control({
           leftSpeed={l}
           rightSpeed={r}
           buzzerOn={buz}
-          connected={connected}
+          connected={mqtt.connected}
           searchState={searchState}
           detections={detections}
         />
@@ -328,12 +231,12 @@ export function ESP32Control({
 
       {/* Buttons */}
       <div className="grid grid-cols-3 gap-1 px-3 pb-2">
-        <button disabled={!connected} onTouchStart={() => sendMotors(255, 255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
-        <button disabled={!connected} onClick={toggleBuzzer} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
-        <button disabled={!connected} onTouchStart={() => sendMotors(-255, -255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
-        <button disabled={!connected} onTouchStart={() => sendMotors(-200, 200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
-        <button disabled={!connected} onClick={() => sendMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>
-        <button disabled={!connected} onTouchStart={() => sendMotors(200, -200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">►</button>
+        <button disabled={!mqtt.connected} onTouchStart={() => sendMotors(255, 255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">▲</button>
+        <button disabled={!mqtt.connected} onClick={toggleBuzzer} className="py-1 bg-zinc-800/80 rounded text-[9px] text-yellow-400 disabled:opacity-30 transition-colors select-none touch-none">{buz ? "🔊" : "🔇"}</button>
+        <button disabled={!mqtt.connected} onTouchStart={() => sendMotors(-255, -255)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-red-400 active:bg-red-900/40 disabled:opacity-30 transition-colors select-none touch-none">▼</button>
+        <button disabled={!mqtt.connected} onTouchStart={() => sendMotors(-200, 200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">◄</button>
+        <button disabled={!mqtt.connected} onClick={() => sendMotors(0, 0)} className="py-1 bg-red-900/30 rounded text-[9px] text-red-400 disabled:opacity-30 transition-colors select-none touch-none">■</button>
+        <button disabled={!mqtt.connected} onTouchStart={() => sendMotors(200, -200)} onTouchEnd={() => sendMotors(0, 0)} className="py-1 bg-zinc-800/80 rounded text-[9px] text-cyan-400 active:bg-cyan-900/40 disabled:opacity-30 transition-colors select-none touch-none">►</button>
       </div>
 
       {/* Motor bars */}
@@ -373,7 +276,7 @@ export function ESP32Control({
       {/* Monitor */}
       <div className="border-t border-zinc-800/40">
         <div className="flex items-center justify-between px-2 py-0.5">
-          <span className="text-[6px] font-mono text-zinc-700">WS</span>
+          <span className="text-[6px] font-mono text-zinc-700">MQTT</span>
           <button onClick={() => setLog([])} className="text-[6px] px-1 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-600 transition-colors">CLR</button>
         </div>
         <div className="h-20 overflow-y-auto px-2 py-1 font-mono text-[7px] leading-relaxed">
