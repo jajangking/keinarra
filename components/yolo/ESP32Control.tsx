@@ -35,10 +35,16 @@ export function ESP32Control({
 }: ESP32ControlProps) {
   const mqtt = useMQTT();
   const [log, setLog] = useState<string[]>([]);
-  const [ip, setIp] = useState(() => {
-    if (typeof window === "undefined") return "";
-    try { return localStorage.getItem("mqtt_broker") ?? ""; } catch { return ""; }
-  });
+  const [brokerInput, setBrokerInput] = useState(mqtt.broker);
+
+  // Sync broker input & auto-connect on mount
+  useEffect(() => {
+    if (mqtt.broker) {
+      setBrokerInput(mqtt.broker);
+      if (!mqtt.connected) mqtt.connect(mqtt.broker);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const lastSentMotorsRef = useRef({ l: 0, r: 0 });
 
@@ -72,12 +78,12 @@ export function ESP32Control({
   }, [mqtt, addLog]);
 
   const connect = useCallback(() => {
-    if (!ip.trim()) { addLog(">> Masukkan alamat broker MQTT"); return; }
-    const url = ip.trim().startsWith("ws") ? ip.trim() : `ws://${ip.trim()}`;
+    if (!brokerInput.trim()) { addLog(">> Masukkan alamat broker MQTT"); return; }
+    const url = brokerInput.trim().startsWith("ws") ? brokerInput.trim() : `ws://${brokerInput.trim()}`;
     addLog(`>> MENYAMBUNG ${url}`);
     mqtt.setBroker(url);
     mqtt.connect(url);
-  }, [ip, addLog, mqtt]);
+  }, [brokerInput, addLog, mqtt]);
 
   const toggleBuzzer = useCallback(() => {
     const pattern = buzRef.current ? "OFF" : "ON:FREQ=800";
@@ -199,9 +205,9 @@ export function ESP32Control({
       {/* Broker input + connect */}
       <div className="flex items-center gap-1 px-3 py-1.5 border-b border-zinc-800/30">
         <input
-          value={ip}
-          onChange={e => setIp(e.target.value)}
-          placeholder="192.168.x.x:9001"
+          value={brokerInput}
+          onChange={e => setBrokerInput(e.target.value)}
+          placeholder="broker.hivemq.com:9001"
           disabled={mqtt.connected}
           className="flex-1 bg-zinc-800/60 border border-zinc-700/50 rounded px-1.5 py-1 text-[8px] font-mono text-zinc-300 placeholder-zinc-700 outline-none focus:border-cyan-700/50 transition-colors"
         />

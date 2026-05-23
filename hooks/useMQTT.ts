@@ -11,6 +11,9 @@ type MqttOptions = {
   reconnectPeriod?: number;
 };
 
+const DEFAULT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
+const BROKER_STORAGE_KEY = "mqtt_broker";
+
 const TOPICS = {
   motor: "keinarra/esp32/motor",
   buzzer: "keinarra/esp32/buzzer",
@@ -29,8 +32,8 @@ let persistentCallbacks: {
 export function useMQTT() {
   const [connected, setConnected] = useState(persistentConnected);
   const [broker, setBroker] = useState(() => {
-    if (typeof window === "undefined") return "";
-    try { return localStorage.getItem("mqtt_broker") ?? ""; } catch { return ""; }
+    if (typeof window === "undefined") return DEFAULT_BROKER;
+    try { return localStorage.getItem(BROKER_STORAGE_KEY) ?? DEFAULT_BROKER; } catch { return DEFAULT_BROKER; }
   });
   const callbacksRef = useRef(persistentCallbacks);
 
@@ -39,7 +42,7 @@ export function useMQTT() {
   });
 
   useEffect(() => {
-    try { localStorage.setItem("mqtt_broker", broker); } catch {}
+    try { localStorage.setItem(BROKER_STORAGE_KEY, broker); } catch {}
   }, [broker]);
 
   const connect = useCallback((url?: string) => {
