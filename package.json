@@ -3,16 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "download-model": "node scripts/download-yolo-model.js",
+    "download-models": "node scripts/download-models.js",
     "dev": "next dev",
-    "build": "node scripts/download-yolo-model.js && node scripts/copy-wasm.js && next build",
+    "download-advanced": "node scripts/download-advanced-models.js",
+    "build": "node scripts/download-models.js && node scripts/download-advanced-models.js && node scripts/copy-wasm.js && next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.32",
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs-backend-webgl": "^4.22.0",
+    "@tensorflow/tfjs-converter": "^4.22.0",
+    "@tensorflow/tfjs-core": "^4.22.0",
     "groq-sdk": "^1.2.0",
     "mqtt": "^5.15.1",
     "next": "16.2.6",
+    "onnxruntime-web": "^1.26.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "rtmlib-ts": "^0.0.5"

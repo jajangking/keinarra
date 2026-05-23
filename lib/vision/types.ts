@@ -1,5 +1,27 @@
-export type DetectionMode = "color" | "motion" | "object" | "all" | "scan" | "yolo";
+export type DetectionMode = "color" | "motion" | "object" | "all" | "scan" | "yolo" | "face" | "hand" | "pose" | "segment" | "train";
 export type RobotMode = "follow" | "interact" | "play" | "manual";
+
+export interface LandmarkPoint {
+  x: number;
+  y: number;
+  z?: number;
+  visibility?: number;
+  name?: string;
+}
+
+export interface HandData {
+  landmarks: LandmarkPoint[];
+  handedness: string;
+  gestures: string[];
+}
+
+export interface PoseData {
+  landmarks: LandmarkPoint[];
+}
+
+export interface FaceData {
+  landmarks?: LandmarkPoint[];
+}
 
 export interface DetectedObject {
   id: string;
@@ -11,6 +33,23 @@ export interface DetectedObject {
   customName?: string;
   color?: string;
   similarity?: number;
+  landmarks?: LandmarkPoint[];
+  handData?: HandData;
+  poseData?: PoseData;
+  faceData?: FaceData;
+}
+
+export interface SegmentationResult {
+  mask: ImageData | null;
+  width: number;
+  height: number;
+}
+
+export interface TrainingSample {
+  id: string;
+  label: string;
+  features: number[];
+  thumbnail?: string;
 }
 
 export interface RobotState {

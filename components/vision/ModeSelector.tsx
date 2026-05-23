@@ -21,6 +21,11 @@ const DETECTION_LABELS: Record<DetectionMode, string> = {
   object: "Objek",
   scan: "Pindai",
   yolo: "YOLO",
+  face: "Wajah",
+  hand: "Tangan",
+  pose: "Tubuh",
+  segment: "Segmen",
+  train: "Latih",
 };
 
 export function ModeSelector({ robotMode, detectionMode, onRobotModeChange, onDetectionModeChange }: ModeSelectorProps) {
@@ -45,8 +50,8 @@ export function ModeSelector({ robotMode, detectionMode, onRobotModeChange, onDe
 
       <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-800">
         <h2 className="text-lg font-semibold mb-3">Mode Deteksi</h2>
-        <div className="grid grid-cols-3 gap-2">
-          {(["all", "color", "motion", "object", "scan", "yolo"] as DetectionMode[]).map((m) => (
+        <div className="grid grid-cols-4 gap-2">
+          {(["all", "color", "motion", "object", "scan", "yolo", "face", "hand", "pose", "segment", "train"] as DetectionMode[]).map((m) => (
             <button
               key={m}
               onClick={() => onDetectionModeChange(m)}

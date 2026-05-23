@@ -44,6 +44,11 @@ const MODE_BADGE: Record<string, { label: string; color: string; bg: string }> =
   object: { label: "OBJECT", color: "text-white", bg: "bg-zinc-700" },
   scan: { label: "SCAN", color: "text-yellow-300", bg: "bg-yellow-900/70" },
   yolo: { label: "YOLO", color: "text-purple-300", bg: "bg-purple-900/70" },
+  face: { label: "FACE", color: "text-green-300", bg: "bg-green-900/70" },
+  hand: { label: "HAND", color: "text-pink-300", bg: "bg-pink-900/70" },
+  pose: { label: "POSE", color: "text-teal-300", bg: "bg-teal-900/70" },
+  segment: { label: "SEGMENT", color: "text-blue-300", bg: "bg-blue-900/70" },
+  train: { label: "TRAIN", color: "text-orange-300", bg: "bg-orange-900/70" },
 };
 
 export function VideoFeed({

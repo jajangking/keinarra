@@ -9,6 +9,7 @@ import { useCamera } from "@/hooks/useCamera";
 import { useVisionProcessor } from "@/hooks/useVisionProcessor";
 import { useGroqAI } from "@/hooks/useGroqAI";
 import { useObjectDetector, getYoloColor } from "@/hooks/useObjectDetector";
+import { useMediaPipeAdvanced } from "@/hooks/useMediaPipeAdvanced";
 import { getDefaultModel, type VisionContext } from "@/lib/groq";
 import { closestNamedColor, createCustomRangeFromArea, rgbToHsv } from "@/lib/vision/color";
 import { loadSavedColors, addSavedColor, removeSavedColor } from "@/lib/vision/saved-colors";
@@ -18,11 +19,14 @@ import {
   addSavedObject,
   removeSavedObject,
 } from "@/lib/vision/objects";
+import { extractFeatures, knnPredict, addTrainingSample, loadTrainingSamples, removeTrainingSample } from "@/lib/vision/classifier";
+import type { TrainingSample } from "@/lib/vision/types";
 import {
   ModeSelector,
   PlayModePanel, ColorDetectionPanel, MotionDetectionPanel,
   InteractionLog, DetectedObjectsList, DebugLogPanel,
   VideoFeed, AIChatPanel, ObjectScanPanel, ESP32Panel,
+  TrainingPanel,
 } from "@/components/vision";
 
 const W = 640;
@@ -143,6 +147,13 @@ export default function VisionPage() {
       oscillatorRef.current = osc;
     }
   }, [esp32Buzzer.on, esp32Buzzer.frequency, esp32Buzzer.duration]);
+  const [trainingSamples, setTrainingSamples] = useState<TrainingSample[]>([]);
+  const [capturedPreview, setCapturedPreview] = useState<string | null>(null);
+  const [labelInput, setLabelInput] = useState("");
+  const [prediction, setPrediction] = useState<{ label: string; confidence: number } | null>(null);
+  const [predicting, setPredicting] = useState(false);
+  const lastCaptureFrameRef = useRef<ImageData | null>(null);
+
   const [followDistance, setFollowDistance] = useState(1.0);
   const [calibDist, setCalibDist] = useState("");
   const [selectedCalibId, setSelectedCalibId] = useState<string | null>(null);
@@ -184,6 +195,7 @@ export default function VisionPage() {
     });
     loadSavedColors().then(setSavedColors);
     loadSavedObjects().then(setSavedObjects);
+    setTrainingSamples(loadTrainingSamples());
   }, []);
 
   const handleInteractionLog = useCallback((msg: string) => {
@@ -230,10 +242,22 @@ export default function VisionPage() {
     processorHandleFrameRef.current = handleFrame;
   }, [handleFrame]);
 
+  const isAdvMode = mode === "face" || mode === "hand" || mode === "pose" || mode === "segment";
+  const isAdvModeRef = useRef(isAdvMode);
+  isAdvModeRef.current = isAdvMode;
+  const mpAdvDetectRef = useRef<(frame: ImageData) => void>(() => {});
+  const mpAdvOverlayRef = useRef<HTMLCanvasElement | null>(null);
+
   const { videoRef, canvasRef, isRunning, fps, start: startCamera, stop: stopCamera } = useCamera({
     width: W, height: H, onFrame: (frame: ImageData) => {
       lastFrameRef.current = frame;
-      processorHandleFrameRef.current?.(frame);
+      lastCaptureFrameRef.current = frame;
+
+      if (isAdvModeRef.current) {
+        mpAdvDetectRef.current?.(frame);
+      } else {
+        processorHandleFrameRef.current?.(frame);
+      }
 
       if (isScanning && isRunning) {
         const currentObjects = objects.filter(o => o.label === "Scan");
@@ -271,6 +295,17 @@ export default function VisionPage() {
         }
       }
 
+      if (mode === "train" && objects.length > 0) {
+        const first = objects[0];
+        const feats = extractFeatures(frame, first.x, first.y, first.w, first.h);
+        const pred = knnPredict(trainingSamples, feats);
+        setPrediction(pred);
+        setPredicting(true);
+      } else {
+        setPredicting(false);
+        if (mode !== "train") setPrediction(null);
+      }
+
       if (pickingColor && crosshairPos) {
         const px = Math.max(0, Math.min(W - 1, crosshairPos.x));
         const py = Math.max(0, Math.min(H - 1, crosshairPos.y));
@@ -283,6 +318,13 @@ export default function VisionPage() {
       }
     },
   });
+
+  const mpAdv = useMediaPipeAdvanced({
+    mode,
+    enabled: isAdvMode && isRunning,
+  });
+  mpAdvDetectRef.current = mpAdv.detectFrame;
+  mpAdvOverlayRef.current = mpAdv.overlayRef.current;
 
   useEffect(() => {
     isScanningRef.current = isScanning;
@@ -661,6 +703,50 @@ export default function VisionPage() {
     setScore(0);
   };
 
+  const handleCaptureSample = useCallback(() => {
+    const frame = lastCaptureFrameRef.current;
+    if (!frame || objects.length === 0) return;
+    const obj = objects[0];
+    const off = document.createElement("canvas");
+    off.width = obj.w;
+    off.height = obj.h;
+    const octx = off.getContext("2d")!;
+    const imgData = octx.createImageData(obj.w, obj.h);
+    const src = frame.data;
+    const dst = imgData.data;
+    const stride = frame.width;
+    for (let row = 0; row < obj.h; row++) {
+      for (let col = 0; col < obj.w; col++) {
+        const si = ((obj.y + row) * stride + (obj.x + col)) * 4;
+        const di = (row * obj.w + col) * 4;
+        dst[di] = src[si];
+        dst[di + 1] = src[si + 1];
+        dst[di + 2] = src[si + 2];
+        dst[di + 3] = 255;
+      }
+    }
+    octx.putImageData(imgData, 0, 0);
+    setCapturedPreview(off.toDataURL());
+    setLabelInput("");
+  }, [objects]);
+
+  const handleSaveSample = useCallback((label: string) => {
+    const frame = lastCaptureFrameRef.current;
+    if (!frame || objects.length === 0) return;
+    const obj = objects[0];
+    const feats = extractFeatures(frame, obj.x, obj.y, obj.w, obj.h);
+    const sample: TrainingSample = {
+      id: `sample-${Date.now()}`,
+      label,
+      features: feats,
+      thumbnail: capturedPreview || undefined,
+    };
+    const updated = addTrainingSample(sample);
+    setTrainingSamples(updated);
+    setCapturedPreview(null);
+    setLabelInput("");
+  }, [objects, capturedPreview]);
+
   const handleYoloClick = useCallback((id: string) => {
     setSelectedCalibId(prev => prev === id ? null : id);
   }, []);
@@ -716,7 +802,8 @@ export default function VisionPage() {
           {/* Left: Vision Feed */}
           <div className="flex-1 min-w-0">
             <VideoFeed
-              videoRef={videoRef} canvasRef={canvasRef} overlayRef={overlayRef}
+              videoRef={videoRef} canvasRef={canvasRef}
+              overlayRef={isAdvMode ? mpAdv.overlayRef : overlayRef}
               containerRef={containerRef}
               isRunning={isRunning} mode={mode}
               objects={objects}
@@ -966,6 +1053,20 @@ export default function VisionPage() {
                   </div>
                 </div>
               </div>
+            )}
+
+            {mode === "train" && (
+              <TrainingPanel
+                samples={trainingSamples}
+                onSamplesChange={setTrainingSamples}
+                onCapture={handleCaptureSample}
+                capturedPreview={capturedPreview}
+                labelInput={labelInput}
+                onLabelChange={setLabelInput}
+                onSaveSample={handleSaveSample}
+                predicting={predicting}
+                prediction={prediction}
+              />
             )}
 
             {(mode === "scan" || isScanning) && (
